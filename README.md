@@ -2,19 +2,24 @@
 
 ClipTube é um app com interface gráfica que baixa vídeos do YouTube usando o yt-dlp.
 
-## Requisitos
+## Instalação (automática na primeira vez)
 
-- Windows 10/11 e Python 3.10+
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) e [FFmpeg](https://ffmpeg.org) instalados e no PATH:
-  ```
-  winget install yt-dlp
-  winget install ffmpeg
-  ```
-- Bibliotecas Python: `python -m pip install -r requirements.txt`
-- Para abrir: `python app.py` (ou gere o `.exe`, veja abaixo)
+Você só precisa do **Windows 10/11** (com o winget, que já vem nele) e do **Python 3.10+** (se for rodar pelo código; o `.exe` não precisa de Python).
 
-**Todo vídeo é salvo em MP4 com vídeo H.264 + áudio AAC**, o formato que abre em qualquer lugar:
-Windows, celular, TV, WhatsApp, Premiere, CapCut, Vegas etc.
+Na primeira vez que o ClipTube abre, ele mesmo prepara tudo:
+
+- **Bibliotecas Python** (customtkinter e pillow): instaladas com o pip, numa janelinha de andamento. No `.exe` elas já vêm dentro.
+- **yt-dlp e FFmpeg**: se faltarem, o app mostra uma janela "Primeira configuração" e instala os dois com o winget quando você clica em **Instalar agora**. Se a instalação falhar, aparece o motivo e o botão **Tentar de novo**.
+
+Depois disso, nada mais é instalado. Para abrir: `python app.py` (ou gere o `.exe`, veja abaixo).
+
+Se preferir instalar na mão:
+
+```
+python -m pip install -r requirements.txt
+winget install yt-dlp.yt-dlp
+winget install yt-dlp.FFmpeg
+```
 
 ### Qualidade
 
@@ -41,6 +46,7 @@ Original  •  2160p (4K)  •  60fps  •  ≈ 2.1 GB  •  converte H.264
 |---|---|
 | `app.py` | A janela (interface, fila, prévia, barra de progresso) |
 | `downloader.py` | Conversa com o yt-dlp: busca informações, baixa, traduz erros |
+| `preparo.py` | Configuração da primeira vez: instala bibliotecas (pip) e yt-dlp/FFmpeg (winget) |
 | `dist\ClipTube.exe` | Gerado pelo `gerar_exe.bat`: o app em um arquivo só, com ícone |
 | `gerar_exe.bat` | Gera o `ClipTube.exe` (com ícone) |
 | `assets\` | Ícone do app: `icone_original.jpg` (arte oficial), `icone.ico`/`icone.png` (gerados) e `criar_icone.py` |

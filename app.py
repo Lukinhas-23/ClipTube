@@ -20,6 +20,11 @@ import threading
 import time
 import queue
 
+import preparo
+
+# Na primeira vez, instala as bibliotecas que faltarem (antes de importá-las).
+preparo.garantir_bibliotecas()
+
 import customtkinter as ctk
 from tkinter import filedialog
 
@@ -216,8 +221,91 @@ class App(ctk.CTk):
         self._id_eventos = self.after(80, self._processar_eventos)
         self.protocol("WM_DELETE_WINDOW", self._ao_fechar)
 
-        if not dl.localizar_ytdlp():
-            self._definir_status("yt-dlp não encontrado. Instale com: winget install yt-dlp", ERRO)
+        # Primeira execução: confere se yt-dlp e FFmpeg estão instalados.
+        preparo.atualizar_path()
+        faltando = preparo.ferramentas_faltando()
+        if faltando:
+            self.after(300, lambda: self._abrir_instalacao(faltando))
+
+    # ------------------------------------------------- instalação das ferramentas
+    def _abrir_instalacao(self, faltando):
+        """Janela que oferece instalar yt-dlp / FFmpeg com o winget."""
+        nomes = " e ".join(nome for _, nome in faltando)
+        self._definir_status(f"Faltam programas necessários: {nomes}.", AMARELO)
+        self.botao_baixar.configure(state="disabled")
+
+        janela = ctk.CTkToplevel(self)
+        janela.title("ClipTube — primeira configuração")
+        janela.geometry("460x250")
+        janela.resizable(False, False)
+        janela.configure(fg_color=FUNDO)
+        janela.transient(self)
+        janela.after(200, janela.grab_set)
+        janela.after(250, lambda: janela.iconbitmap(ICONE_ICO) if os.path.isfile(ICONE_ICO) else None)
+        janela.protocol("WM_DELETE_WINDOW", lambda: None)   # só fecha pelos botões
+
+        ctk.CTkLabel(janela, text="Primeira configuração", text_color=TEXTO,
+                     font=(FONTE, 18, "bold")).pack(pady=(18, 4))
+        texto = ctk.CTkLabel(
+            janela, text=f"O ClipTube precisa de: {nomes}.\n"
+                         "Posso instalar para você agora "
+                         "(usa o winget, pode demorar alguns minutos).",
+            text_color=TEXTO_SEC, font=(FONTE, 13), justify="center", wraplength=410)
+        texto.pack(padx=20)
+        andamento = ctk.CTkLabel(janela, text="", text_color=AMARELO, font=(FONTE, 12),
+                                 wraplength=410)
+        andamento.pack(pady=(10, 4))
+        barra = ctk.CTkProgressBar(janela, mode="indeterminate", progress_color=VERMELHO,
+                                   fg_color=CAMPO, height=8)
+
+        botoes = ctk.CTkFrame(janela, fg_color="transparent")
+        botoes.pack(side="bottom", pady=16)
+        botao_instalar = ctk.CTkButton(botoes, text="Instalar agora", width=150, height=38,
+                                       fg_color=VERMELHO, hover_color=VERMELHO_HOVER,
+                                       font=(FONTE, 14, "bold"))
+        botao_sair = ctk.CTkButton(botoes, text="Agora não", width=110, height=38,
+                                   fg_color=BOTAO_CINZA, hover_color=BOTAO_CINZA_HOVER,
+                                   font=(FONTE, 13))
+        botao_instalar.pack(side="left", padx=6)
+        botao_sair.pack(side="left", padx=6)
+
+        def fechar(concluido):
+            barra.stop()
+            janela.grab_release()
+            janela.destroy()
+            if concluido:
+                self.botao_baixar.configure(state="normal")
+                self._definir_status("Tudo pronto! Cole um link para começar.", VERDE)
+            else:
+                self._definir_status("Instale yt-dlp e FFmpeg para poder baixar "
+                                     "(winget install yt-dlp.yt-dlp yt-dlp.FFmpeg).", ERRO)
+
+        def terminou(ok, mensagem):
+            barra.stop()
+            if ok:
+                fechar(True)
+                return
+            andamento.configure(text=mensagem, text_color=ERRO)
+            botao_instalar.configure(state="normal", text="Tentar de novo")
+            botao_sair.configure(state="normal", text="Fechar")
+
+        def instalar():
+            botao_instalar.configure(state="disabled")
+            botao_sair.configure(state="disabled")
+            andamento.configure(text="Começando...", text_color=AMARELO)
+            barra.pack(fill="x", padx=30, pady=(0, 4))
+            barra.start()
+
+            def tarefa():
+                ok, msg = preparo.instalar_ferramentas(
+                    preparo.ferramentas_faltando(),
+                    ao_log=lambda t: self._na_ui(
+                        lambda: andamento.configure(text=t, text_color=AMARELO)))
+                self._na_ui(terminou, ok, msg)
+            threading.Thread(target=tarefa, daemon=True).start()
+
+        botao_instalar.configure(command=instalar)
+        botao_sair.configure(command=lambda: fechar(False))
 
     def _aplicar_icone(self):
         """Coloca o ícone do ClipTube na janela e na barra de tarefas."""

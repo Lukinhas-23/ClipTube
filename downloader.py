@@ -14,13 +14,14 @@ O FFmpeg instalado é encontrado pelo próprio yt-dlp para juntar vídeo + áudi
 
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 import threading
 import time
 import urllib.request
 from io import BytesIO
+
+from preparo import localizar_ferramenta
 
 # Formato: melhor vídeo + melhor áudio, juntados em MP4.
 FORMATO = "bv*+ba/b"
@@ -72,15 +73,8 @@ class Cancelado(Exception):
 # Localização do yt-dlp
 # ---------------------------------------------------------------------------
 def localizar_ytdlp():
-    """Procura o yt-dlp no PATH e, se não achar, na pasta de links do winget."""
-    caminho = shutil.which("yt-dlp")
-    if caminho:
-        return caminho
-    winget = os.path.join(os.environ.get("LOCALAPPDATA", ""),
-                          "Microsoft", "WinGet", "Links", "yt-dlp.exe")
-    if os.path.isfile(winget):
-        return winget
-    return None
+    """Procura o yt-dlp (PATH e pastas do winget). Retorna o caminho ou None."""
+    return localizar_ferramenta("yt-dlp")
 
 
 def _ambiente_utf8():
@@ -318,6 +312,11 @@ class Baixador:
                 except OSError:
                     pass
 
+    @staticmethod
+    def _local_ffmpeg():
+        ffmpeg = localizar_ferramenta("ffmpeg")
+        return ["--ffmpeg-location", os.path.dirname(ffmpeg)] if ffmpeg else []
+
     def baixar(self, url, pasta, ao_progresso=None, ao_etapa=None, tentativas=3,
                limite_res=None):
         """Baixa um vídeo, tentando de novo se o YouTube recusar com erro 403
@@ -365,6 +364,7 @@ class Baixador:
             "--print-to-file", "after_move:filepath", arquivo_caminho,
             "-P", pasta,
             "--no-playlist",          # link com "&list=" baixa só o vídeo, não a playlist
+            *self._local_ffmpeg(),    # diz ao yt-dlp onde está o FFmpeg (mesmo fora do PATH)
             "--newline",              # uma linha por atualização de progresso
             "--color", "never",
             "--progress-template", "download:" + template,
@@ -436,7 +436,7 @@ class Baixador:
     @staticmethod
     def ler_codecs(caminho):
         """Retorna (codec_video, codec_audio, duracao_seg) usando o ffprobe."""
-        ffprobe = shutil.which("ffprobe")
+        ffprobe = localizar_ferramenta("ffprobe")
         if not ffprobe:
             return None, None, None
 
@@ -462,7 +462,7 @@ class Baixador:
         video, audio, duracao = self.ler_codecs(caminho)
         if video is None or (video == "h264" and audio in ("aac", None)):
             return  # já compatível (ou sem ffprobe para conferir)
-        ffmpeg = shutil.which("ffmpeg")
+        ffmpeg = localizar_ferramenta("ffmpeg")
         if not ffmpeg:
             raise ErroDownload("FFmpeg não encontrado. Ele é necessário para deixar "
                                "o vídeo em formato compatível.")
