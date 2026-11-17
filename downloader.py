@@ -13,6 +13,7 @@ O FFmpeg instalado é encontrado pelo próprio yt-dlp para juntar vídeo + áudi
 """
 
 import json
+import re
 import os
 import subprocess
 import tempfile
@@ -21,7 +22,9 @@ import time
 import urllib.request
 from io import BytesIO
 
+import instagram
 from preparo import localizar_ferramenta
+from previas import extrair_dados_previa
 
 # Formato: melhor vídeo + melhor áudio, juntados em MP4.
 FORMATO = "bv*+ba/b"
@@ -62,7 +65,15 @@ MARCA_PROGRESSO = "##PROG##"
 
 
 class ErroDownload(Exception):
-    """Erro já traduzido para uma mensagem simples em português."""
+    """Erro já traduzido para uma mensagem simples em português.
+
+    `original` guarda o texto cru da ferramenta (yt-dlp/gallery-dl), para o app
+    decidir o que fazer (ex.: tentar o gallery-dl quando o post só tem fotos).
+    """
+
+    def __init__(self, mensagem="", original=""):
+        super().__init__(mensagem)
+        self.original = original or mensagem
 
 
 class Cancelado(Exception):
@@ -147,14 +158,26 @@ def traduzir_erro(texto):
     return f"Não foi possível baixar: {ultima}"
 
 
+def traduzir_erro_plataforma(texto, url, login=None):
+    """Como traduzir_erro, mas com as mensagens específicas do Instagram quando for o caso."""
+    if instagram.eh_instagram(url):
+        frase = instagram.traduzir_erro_instagram(texto, login)
+        if frase:
+            return frase
+    return traduzir_erro(texto)
+
+
 # ---------------------------------------------------------------------------
 # Informações do vídeo (título, canal, duração, miniatura)
 # ---------------------------------------------------------------------------
-def obter_info(url, timeout=90):
+def obter_info(url, timeout=90, login=None):
     """Pergunta ao yt-dlp os dados do vídeo, sem baixar nada.
 
     Retorna um dicionário com: titulo, canal, duracao (segundos), miniatura (URL).
+    `login` só vale para links do Instagram (veja instagram.py).
     """
+    if instagram.eh_instagram(url):
+        return obter_info_instagram(url, login, timeout)
     ytdlp = localizar_ytdlp()
     if not ytdlp:
         raise ErroDownload("yt-dlp não encontrado. Instale com: winget install yt-dlp")
@@ -180,6 +203,85 @@ def obter_info(url, timeout=90):
         "duracao": dados.get("duration"),
         "miniatura": dados.get("thumbnail"),
         "qualidades": listar_qualidades(dados),
+        "previa": extrair_dados_previa(dados),     # miniaturas e links para o recorte de clip
+    }
+
+
+def obter_info_instagram(url, login=None, timeout=90):
+    """Dados de um post/reel/story do Instagram.
+
+    Primeiro tenta o yt-dlp (vídeos). Se o post não tiver vídeo (só fotos), usa o
+    gallery-dl. Retorna o mesmo formato do obter_info, mais: plataforma="instagram",
+    fotos e videos (quantidades).
+    """
+    if not instagram.eh_post_instagram(url):
+        raise ErroDownload("Use o link de um post, reel ou story do Instagram "
+                           "(perfis inteiros não são suportados).")
+    ytdlp = localizar_ytdlp()
+    if not ytdlp:
+        raise ErroDownload("yt-dlp não encontrado. Instale com: winget install yt-dlp")
+    login_args = instagram.argumentos_login(login)
+
+    try:
+        proc = subprocess.run([ytdlp, "-J", "--no-warnings", *login_args, url],
+                              capture_output=True, timeout=timeout,
+                              creationflags=SEM_JANELA, env=_ambiente_utf8())
+    except subprocess.TimeoutExpired:
+        raise ErroDownload("O Instagram demorou demais para responder. Tente de novo.")
+    saida = proc.stdout.decode("utf-8", errors="replace")
+    erro = proc.stderr.decode("utf-8", errors="replace")
+
+    if proc.returncode == 0 and saida.strip():
+        dados = json.loads(saida)
+        entradas = [e for e in (dados.get("entries") or []) if e]
+        primeiro = entradas[0] if entradas else dados
+        legenda = (dados.get("description") or primeiro.get("description") or "").strip()
+        usuario = primeiro.get("uploader_id") or primeiro.get("uploader") or ""
+        titulo = (legenda.splitlines()[0].strip()[:90] if legenda else "") \
+            or dados.get("title") or "Vídeo do Instagram"
+        return {
+            "titulo": titulo,
+            "canal": f"@{usuario}" if usuario else "",
+            "duracao": None if entradas else dados.get("duration"),
+            "miniatura": primeiro.get("thumbnail") or dados.get("thumbnail"),
+            "qualidades": [],
+            "previa": {"storyboards": [], "stream": None},
+            "plataforma": "instagram",
+            "fotos": 0,
+            "videos": len(entradas) or 1,
+        }
+
+    # O yt-dlp não conseguiu. Cookies com problema ou internet fora: o gallery-dl não ajuda.
+    if instagram.erro_de_cookies(erro) or traduzir_erro(erro).startswith("Sem conexão"):
+        raise ErroDownload(traduzir_erro_plataforma(erro, url, login), original=erro)
+
+    gallerydl = localizar_ferramenta("gallery-dl")
+    if not gallerydl:
+        if instagram.precisa_gallerydl(erro):
+            raise ErroDownload("Esse post parece ter só fotos e isso precisa do gallery-dl. "
+                               "Instale com: winget install mikf.gallery-dl", original=erro)
+        raise ErroDownload(traduzir_erro_plataforma(erro, url, login), original=erro)
+
+    try:
+        proc2 = subprocess.run([gallerydl, "-j", "--no-colors", *login_args, url],
+                               capture_output=True, timeout=timeout,
+                               creationflags=SEM_JANELA, env=_ambiente_utf8())
+    except subprocess.TimeoutExpired:
+        raise ErroDownload("O Instagram demorou demais para responder. Tente de novo.")
+    info, erro_gd = instagram.ler_json_gallerydl(proc2.stdout.decode("utf-8", errors="replace"))
+    if info is None:
+        completo = f"{erro} {erro_gd or ''} {proc2.stderr.decode('utf-8', errors='replace')}"
+        raise ErroDownload(traduzir_erro_plataforma(completo, url, login), original=completo)
+    return {
+        "titulo": info["titulo"],
+        "canal": info["canal"],
+        "duracao": None,
+        "miniatura": info["miniatura"],
+        "qualidades": [],
+        "previa": {"storyboards": [], "stream": None},
+        "plataforma": "instagram",
+        "fotos": info["fotos"],
+        "videos": info["videos"],
     }
 
 
@@ -238,6 +340,39 @@ def baixar_miniatura(url_imagem, timeout=15):
 # ---------------------------------------------------------------------------
 # Download
 # ---------------------------------------------------------------------------
+def nome_tempo(segundos):
+    """Tempo para usar em nome de arquivo (sem ":"): 65 -> "01m05s", 3725 -> "1h02m05s"."""
+    decimo = round((segundos - int(segundos)) * 10)       # clips podem ter décimos (ex.: 40.5)
+    segundos = int(segundos)
+    h, resto = divmod(segundos, 3600)
+    m, s = divmod(resto, 60)
+    seg = f"{s:02d}" + (f".{decimo}" if decimo else "")
+    return f"{h}h{m:02d}m{seg}s" if h else f"{m:02d}m{seg}s"
+
+
+_REGEX_TEMPO_FFMPEG = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+_REGEX_VELOCIDADE_FFMPEG = re.compile(r"speed=\s*([\d.]+)x")
+
+
+def _linhas(fluxo):
+    """Lê a saída de um processo linha a linha, separando também por "\r".
+
+    O FFmpeg atualiza o andamento reescrevendo a mesma linha (com "\r"), então
+    um simples `for linha in fluxo` só enxergaria isso no final.
+    """
+    resto = b""
+    while True:
+        pedaco = fluxo.read1(4096) if hasattr(fluxo, "read1") else fluxo.read(4096)
+        if not pedaco:
+            break
+        resto += pedaco
+        *completas, resto = re.split(rb"[\r\n]+", resto)
+        for linha in completas:
+            yield linha.decode("utf-8", errors="replace").strip()
+    if resto.strip():
+        yield resto.decode("utf-8", errors="replace").strip()
+
+
 def _numero(valor):
     """Converte o texto do template ("123", "123.4" ou "NA") em número ou None."""
     try:
@@ -318,12 +453,18 @@ class Baixador:
         return ["--ffmpeg-location", os.path.dirname(ffmpeg)] if ffmpeg else []
 
     def baixar(self, url, pasta, ao_progresso=None, ao_etapa=None, tentativas=3,
-               limite_res=None):
-        """Baixa um vídeo, tentando de novo se o YouTube recusar com erro 403
-        (isso acontece de vez em quando e normalmente some na tentativa seguinte)."""
+               limite_res=None, inicio=None, fim=None, login=None):
+        """Baixa um vídeo (ou só um trecho dele, se inicio/fim forem informados, em
+        segundos), tentando de novo se o YouTube recusar com erro 403
+        (isso acontece de vez em quando e normalmente some na tentativa seguinte).
+
+        Links do Instagram seguem outro caminho (veja _baixar_instagram)."""
+        if instagram.eh_instagram(url):
+            return self._baixar_instagram(url, pasta, ao_progresso, ao_etapa, login)
         for tentativa in range(1, tentativas + 1):
             try:
-                return self._baixar_uma_vez(url, pasta, ao_progresso, ao_etapa, limite_res)
+                return self._baixar_uma_vez(url, pasta, ao_progresso, ao_etapa,
+                                            limite_res, inicio, fim)
             except ErroDownload as e:
                 temporario = "erro 403" in str(e)
                 if not temporario or tentativa == tentativas or self._cancelado.is_set():
@@ -332,7 +473,8 @@ class Baixador:
                     ao_etapa(f"O YouTube recusou, tentando de novo ({tentativa + 1}/{tentativas})...")
                 time.sleep(2)
 
-    def _baixar_uma_vez(self, url, pasta, ao_progresso=None, ao_etapa=None, limite_res=None):
+    def _baixar_uma_vez(self, url, pasta, ao_progresso=None, ao_etapa=None,
+                        limite_res=None, inicio=None, fim=None, login=None):
         """Baixa um vídeo. Bloqueia até terminar (chame dentro de uma thread).
 
         ao_progresso(dict): recebe {"percentual", "velocidade", "restante"}.
@@ -356,14 +498,36 @@ class Baixador:
         if os.path.exists(arquivo_caminho):
             os.remove(arquivo_caminho)
 
+        # Clip: baixa só o trecho [inicio, fim]. O --force-keyframes-at-cuts faz o
+        # corte exato (sem sobra no começo), e o arquivo ganha o trecho no nome.
+        clipe = inicio is not None and fim is not None
+        duracao_clipe = (fim - inicio) if clipe else None
+        argumentos_clipe = []
+        if clipe:
+            argumentos_clipe = [
+                "--download-sections", f"*{inicio:.2f}-{fim:.2f}",
+                "--force-keyframes-at-cuts",
+                "-o", f"%(title)s [%(id)s] clip {nome_tempo(inicio)}-{nome_tempo(fim)}.%(ext)s",
+            ]
+
+        # Instagram: posts com vários vídeos viram uma "playlist" (todos devem ser baixados),
+        # os cookies do login vão junto e o arquivo se chama "usuario - id".
+        ig = instagram.eh_instagram(url)
+        argumentos_ig = []
+        if ig:
+            argumentos_ig = [*instagram.argumentos_login(login),
+                             "-o", "%(uploader_id|instagram)s - %(id)s.%(ext)s"]
+
         comando = [
             ytdlp,
             "-f", FORMATO,
             "-S", ordenacao(limite_res),
+            *argumentos_clipe,
+            *argumentos_ig,
             "--merge-output-format", "mp4",
             "--print-to-file", "after_move:filepath", arquivo_caminho,
             "-P", pasta,
-            "--no-playlist",          # link com "&list=" baixa só o vídeo, não a playlist
+            *([] if ig else ["--no-playlist"]),   # link com "&list=" baixa só o vídeo, não a playlist
             *self._local_ffmpeg(),    # diz ao yt-dlp onde está o FFmpeg (mesmo fora do PATH)
             "--newline",              # uma linha por atualização de progresso
             "--color", "never",
@@ -381,12 +545,24 @@ class Baixador:
         destinos = []   # arquivos que o yt-dlp está criando (para limpar se cancelar)
         ja_existia = False
 
-        for bruto in self._processo.stdout:
-            linha = bruto.decode("utf-8", errors="replace").strip()
+        for linha in _linhas(self._processo.stdout):
             if not linha:
                 continue
 
-            if linha.startswith(MARCA_PROGRESSO):
+            if clipe and linha.startswith("frame=") and ao_progresso:
+                # Andamento do corte (vem do FFmpeg): "time=00:00:05.00 speed=1.5x"
+                tempo = _REGEX_TEMPO_FFMPEG.search(linha)
+                if tempo:
+                    h, m, seg = tempo.groups()
+                    feito = int(h) * 3600 + int(m) * 60 + float(seg)
+                    vel = _REGEX_VELOCIDADE_FFMPEG.search(linha)
+                    vel_x = float(vel.group(1)) if vel else None
+                    ao_progresso({
+                        "percentual": max(0.0, min(feito / duracao_clipe, 1.0)),
+                        "velocidade": None,
+                        "restante": ((duracao_clipe - feito) / vel_x) if vel_x else None,
+                    })
+            elif linha.startswith(MARCA_PROGRESSO):
                 baixado, total, estimado, velocidade, restante = (
                     _numero(v) for v in linha[len(MARCA_PROGRESSO):].split("|"))
                 total = total or estimado
@@ -400,7 +576,11 @@ class Baixador:
                 partes += 1
                 destinos.append(linha.split(":", 1)[1].strip())
                 if ao_etapa:
-                    ao_etapa("Baixando vídeo..." if partes == 1 else "Baixando áudio...")
+                    if clipe:
+                        ao_etapa("Cortando o clip (vídeo)..." if partes == 1
+                                 else "Cortando o clip (áudio)...")
+                    else:
+                        ao_etapa("Baixando vídeo..." if partes == 1 else "Baixando áudio...")
             elif "has already been downloaded" in linha:
                 ja_existia = True
             elif linha.startswith("[Merger]"):
@@ -416,19 +596,100 @@ class Baixador:
             self._apagar_parciais(destinos)
             raise Cancelado()
         if codigo != 0:
-            raise ErroDownload(traduzir_erro("\n".join(linhas_erro)))
+            texto_erro = "\n".join(linhas_erro)
+            raise ErroDownload(traduzir_erro_plataforma(texto_erro, url, login), original=texto_erro)
 
-        # Confere o arquivo final e converte para H.264/AAC se precisar.
+        # Confere os arquivos finais (um post do Instagram pode ter vários) e converte
+        # para H.264/AAC o que precisar.
         try:
             with open(arquivo_caminho, "r", encoding="utf-8") as f:
-                caminho_final = f.read().strip().splitlines()[-1]
+                caminhos_finais = [l.strip() for l in f.read().splitlines() if l.strip()]
             os.remove(arquivo_caminho)
-        except (OSError, IndexError):
-            caminho_final = None
-        if caminho_final and os.path.isfile(caminho_final):
-            self.garantir_compativel(caminho_final, ao_progresso, ao_etapa)
+        except OSError:
+            caminhos_finais = []
+        for caminho_final in caminhos_finais:
+            if os.path.isfile(caminho_final):
+                self.garantir_compativel(caminho_final, ao_progresso, ao_etapa)
 
         return "ja_existia" if ja_existia and partes == 0 else "ok"
+
+    # ------------------------------------------------------------------
+    # Instagram
+    # ------------------------------------------------------------------
+    def _baixar_instagram(self, url, pasta, ao_progresso, ao_etapa, login):
+        """Vídeo/reel pelo yt-dlp; se o post só tiver fotos (ou o yt-dlp não souber), gallery-dl."""
+        if not instagram.eh_post_instagram(url):
+            raise ErroDownload("Use o link de um post, reel ou story do Instagram "
+                               "(perfis inteiros não são suportados).")
+        try:
+            return self._baixar_uma_vez(url, pasta, ao_progresso, ao_etapa, login=login)
+        except ErroDownload as erro1:
+            if self._cancelado.is_set():
+                raise
+            texto = erro1.original
+            if instagram.erro_de_cookies(texto) or str(erro1).startswith("Sem conexão"):
+                raise
+            if not localizar_ferramenta("gallery-dl"):
+                if instagram.precisa_gallerydl(texto):
+                    raise ErroDownload("Esse post só tem fotos e isso precisa do gallery-dl. "
+                                       "Instale com: winget install mikf.gallery-dl", original=texto)
+                raise
+            if ao_etapa:
+                ao_etapa("Baixando as fotos do post...")
+            try:
+                return self._baixar_gallerydl(url, pasta, ao_progresso, ao_etapa, login)
+            except ErroDownload as erro2:
+                # Mostra a causa mais útil (login, conta privada...) em vez de um erro genérico
+                junto = f"{texto} {erro2.original}"
+                frase = instagram.traduzir_erro_instagram(junto, login)
+                raise ErroDownload(frase or str(erro2), original=junto)
+
+    def _baixar_gallerydl(self, url, pasta, ao_progresso, ao_etapa, login):
+        """Baixa fotos (e vídeos) de um post com o gallery-dl."""
+        gallerydl = localizar_ferramenta("gallery-dl")
+        if not gallerydl:
+            raise ErroDownload("Falta o gallery-dl. Instale com: winget install mikf.gallery-dl")
+        os.makedirs(pasta, exist_ok=True)
+        self._cancelado.clear()
+        comando = [
+            gallerydl, "--no-colors", "-D", pasta,
+            "-f", "{username}_{post_shortcode|media_id|id}_{num}.{extension}",
+            *instagram.argumentos_login(login),
+            url,
+        ]
+        self._processo = subprocess.Popen(
+            comando, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            creationflags=SEM_JANELA, env=_ambiente_utf8())
+
+        baixados, existentes, linhas_erro = [], [], []
+        for linha in _linhas(self._processo.stdout):
+            if not linha:
+                continue
+            existente = linha.startswith("# ")
+            caminho = linha[2:].strip() if existente else linha
+            if os.path.isfile(caminho):
+                (existentes if existente else baixados).append(caminho)
+                if ao_etapa:
+                    ao_etapa(f"Baixando do Instagram... ({len(baixados) + len(existentes)} arquivo(s))")
+            elif "[error]" in linha.lower() or linha.lower().startswith("error"):
+                linhas_erro.append(linha)
+
+        codigo = self._processo.wait()
+        self._processo = None
+        if self._cancelado.is_set():
+            raise Cancelado()
+        if not baixados and not existentes:
+            texto = "\n".join(linhas_erro)
+            if codigo != 0 or texto:
+                raise ErroDownload(traduzir_erro_plataforma(texto, url, login), original=texto)
+            raise ErroDownload("Não encontrei fotos nem vídeos nesse link.")
+
+        for caminho in baixados:                  # vídeos de post com fotos: deixa compatível
+            if caminho.lower().endswith((".mp4", ".mov", ".webm", ".m4v")):
+                self.garantir_compativel(caminho, ao_progresso, ao_etapa)
+        if ao_progresso:
+            ao_progresso({"percentual": 1.0, "velocidade": None, "restante": None})
+        return "ja_existia" if not baixados else "ok"
 
     # ------------------------------------------------------------------
     # Compatibilidade: garante vídeo H.264 + áudio AAC

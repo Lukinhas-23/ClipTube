@@ -23,6 +23,15 @@ SEM_JANELA = 0x08000000 if os.name == "nt" else 0
 # Pacotes do winget que o app precisa (o FFmpeg inclui o ffprobe).
 PACOTE_YTDLP = ("yt-dlp.yt-dlp", "yt-dlp")
 PACOTE_FFMPEG = ("yt-dlp.FFmpeg", "FFmpeg")
+# Só é instalado quando você baixa FOTOS do Instagram (pergunta antes).
+PACOTE_GALLERYDL = ("mikf.gallery-dl", "gallery-dl")
+
+# Programas que cada pacote do winget deve deixar instalados
+EXECUTAVEIS = {
+    PACOTE_YTDLP[0]: ("yt-dlp",),
+    PACOTE_FFMPEG[0]: ("ffmpeg", "ffprobe"),
+    PACOTE_GALLERYDL[0]: ("gallery-dl",),
+}
 
 _PASTA_APP = os.path.dirname(os.path.abspath(__file__))
 
@@ -137,7 +146,8 @@ def instalar_ferramentas(pacotes, ao_log=None):
             return False, f"Não foi possível executar o winget: {e}"
 
     atualizar_path()
-    ainda = ferramentas_faltando()
+    ainda = [(i, n) for i, n in pacotes
+             if not all(localizar_ferramenta(x) for x in EXECUTAVEIS.get(i, ()))]
     if ainda:
         nomes = ", ".join(n for _, n in ainda)
         return False, f"A instalação terminou, mas não encontrei: {nomes}."

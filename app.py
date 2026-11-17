@@ -29,6 +29,8 @@ import customtkinter as ctk
 from tkinter import filedialog
 
 import downloader as dl
+import clip_ui
+import instagram
 
 # ---------------------------------------------------------------------------
 # Configurações gerais e cores
@@ -36,20 +38,16 @@ import downloader as dl
 TITULO_APP = "ClipTube"
 PASTA_PADRAO = r"D:\Clips IShowSpeed certa"
 
-FONTE = "Segoe UI"
-VERMELHO = "#FF0033"
-VERMELHO_HOVER = "#CC0029"
-FUNDO = "#0F0F0F"
-CARTAO = "#1C1C1C"
-CAMPO = "#272727"
-BOTAO_CINZA = "#3A3A3A"
-BOTAO_CINZA_HOVER = "#4A4A4A"
-TEXTO = "#F1F1F1"
-TEXTO_SEC = "#AAAAAA"
-TEXTO_APAGADO = "#6E6E6E"     # texto de exemplo (placeholder), com pouca opacidade
-VERDE = "#3DDC84"
-AMARELO = "#F5C451"
-ERRO = "#FF6B6B"
+
+def pasta_padrao():
+    """Pasta de destino inicial. Usa a D:\Clips IShowSpeed certa; se o disco D: não
+    existir neste computador (ex.: outro PC), usa Vídeos\ClipTube."""
+    unidade = os.path.splitdrive(PASTA_PADRAO)[0] + "\\"
+    if os.path.isdir(unidade):
+        return PASTA_PADRAO
+    return os.path.join(os.path.expanduser("~"), "Videos", "ClipTube")
+
+from tema import *   # FONTE, VERMELHO, FUNDO, CARTAO, CAMPO, TEXTO... (cores do app)
 
 # Reconhece links do YouTube (vídeos, shorts, youtu.be, music...)
 REGEX_URL = re.compile(r"https?://[^\s<>\"']+")
@@ -96,6 +94,23 @@ def salvar_config(config):
 
 def eh_link_youtube(texto):
     return bool(REGEX_YOUTUBE.match(texto.strip()))
+
+
+def eh_link_suportado(texto):
+    """Link do YouTube ou do Instagram."""
+    return eh_link_youtube(texto) or instagram.eh_instagram(texto)
+
+
+def mensagem_link_invalido(texto):
+    """None se o link serve; senão, a frase explicando o problema."""
+    if eh_link_youtube(texto):
+        return None
+    if instagram.eh_instagram(texto):
+        if instagram.eh_post_instagram(texto):
+            return None
+        return ("Use o link de um post, reel ou story do Instagram "
+                "(perfis inteiros não são suportados).")
+    return "Link inválido. Use um link do YouTube ou do Instagram."
 
 
 def formatar_tamanho(bytes_por_seg):
@@ -173,8 +188,12 @@ class ItemFila:
         "cancelado": ("Cancelado", TEXTO_SEC),
     }
 
-    def __init__(self, url, limite_res=None, rotulo_qualidade="Original"):
+    def __init__(self, url, limite_res=None, rotulo_qualidade="Original",
+                 inicio=None, fim=None, login=None):
         self.url = url
+        self.login = login                        # Instagram: como entrar (cookies do navegador)
+        self.inicio = inicio                      # clip: segundo inicial (None = vídeo inteiro)
+        self.fim = fim                            # clip: segundo final
         self.limite_res = limite_res              # None = qualidade original
         self.rotulo_qualidade = rotulo_qualidade  # texto curto mostrado na fila
         self.titulo = None
@@ -193,13 +212,15 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("dark")
         self.title(TITULO_APP)
         self._aplicar_icone()
-        self.geometry("700x610")
-        self.minsize(660, 570)
+        # A janela se ajusta à altura da tela (em telas 1366x768 a área útil tem só ~720 px).
+        altura = max(600, min(720, self.winfo_screenheight() - 90))
+        self.geometry(f"740x{altura}")
+        self.minsize(700, 590)
         self.configure(fg_color=FUNDO)
 
         # Estado
         self.config_app = carregar_config()
-        self.pasta = self.config_app.get("pasta") or PASTA_PADRAO
+        self.pasta = self.config_app.get("pasta") or pasta_padrao()
         self.fila = []
         self.trabalhando = False
         self.baixador = dl.Baixador()
@@ -209,13 +230,17 @@ class App(ctk.CTk):
         self._token_previa = 0
         self._ultimo_link = ""
         self._opcoes_qualidade = []   # [(texto, limite_res, rotulo_curto)] do link atual
+        self._plataforma = "youtube"  # o que a linha "Qualidade/Login" mostra agora
+        self._ofereceu_gallerydl = False
+        self.login_ig = {**instagram.LOGIN_PADRAO,
+                         **(self.config_app.get("login_instagram") or {})}
         self._agendamento_previa = None
         self._imagem_previa = None
         # Imagem "vazia" usada quando não há miniatura. (Remover a imagem de um
         # CTkLabel depois de já ter mostrado uma causa erro no CustomTkinter.)
         from PIL import Image
-        vazia = Image.new("RGB", (128, 72), CAMPO)
-        self._imagem_vazia = ctk.CTkImage(light_image=vazia, dark_image=vazia, size=(128, 72))
+        vazia = Image.new("RGB", (114, 64), CAMPO)
+        self._imagem_vazia = ctk.CTkImage(light_image=vazia, dark_image=vazia, size=(114, 64))
 
         self._montar_interface()
         self._id_eventos = self.after(80, self._processar_eventos)
@@ -228,14 +253,18 @@ class App(ctk.CTk):
             self.after(300, lambda: self._abrir_instalacao(faltando))
 
     # ------------------------------------------------- instalação das ferramentas
-    def _abrir_instalacao(self, faltando):
-        """Janela que oferece instalar yt-dlp / FFmpeg com o winget."""
+    def _abrir_instalacao(self, faltando, opcional=False, motivo=None):
+        """Janela que oferece instalar programas com o winget (yt-dlp, FFmpeg, gallery-dl).
+
+        opcional=True: o app já funciona sem eles (ex.: gallery-dl, só para fotos do
+        Instagram), então "Agora não" não bloqueia nada."""
         nomes = " e ".join(nome for _, nome in faltando)
-        self._definir_status(f"Faltam programas necessários: {nomes}.", AMARELO)
-        self.botao_baixar.configure(state="disabled")
+        if not opcional:
+            self._definir_status(f"Faltam programas necessários: {nomes}.", AMARELO)
+            self.botao_baixar.configure(state="disabled")
 
         janela = ctk.CTkToplevel(self)
-        janela.title("ClipTube — primeira configuração")
+        janela.title("ClipTube — fotos do Instagram" if opcional else "ClipTube — primeira configuração")
         janela.geometry("460x250")
         janela.resizable(False, False)
         janela.configure(fg_color=FUNDO)
@@ -244,10 +273,11 @@ class App(ctk.CTk):
         janela.after(250, lambda: janela.iconbitmap(ICONE_ICO) if os.path.isfile(ICONE_ICO) else None)
         janela.protocol("WM_DELETE_WINDOW", lambda: None)   # só fecha pelos botões
 
-        ctk.CTkLabel(janela, text="Primeira configuração", text_color=TEXTO,
-                     font=(FONTE, 18, "bold")).pack(pady=(18, 4))
+        ctk.CTkLabel(janela, text="Fotos do Instagram" if opcional else "Primeira configuração",
+                     text_color=TEXTO, font=(FONTE, 18, "bold")).pack(pady=(18, 4))
+        descricao = motivo or f"O ClipTube precisa de: {nomes}."
         texto = ctk.CTkLabel(
-            janela, text=f"O ClipTube precisa de: {nomes}.\n"
+            janela, text=f"{descricao}\n"
                          "Posso instalar para você agora "
                          "(usa o winget, pode demorar alguns minutos).",
             text_color=TEXTO_SEC, font=(FONTE, 13), justify="center", wraplength=410)
@@ -273,7 +303,14 @@ class App(ctk.CTk):
             barra.stop()
             janela.grab_release()
             janela.destroy()
-            if concluido:
+            if opcional:
+                if concluido:
+                    self._definir_status("gallery-dl instalado! Agora dá para baixar fotos do Instagram.",
+                                         VERDE)
+                else:
+                    self._definir_status("Tudo bem. Sem o gallery-dl só dá para baixar vídeos "
+                                         "do Instagram (fotos não).", AMARELO)
+            elif concluido:
                 self.botao_baixar.configure(state="normal")
                 self._definir_status("Tudo pronto! Cole um link para começar.", VERDE)
             else:
@@ -298,7 +335,7 @@ class App(ctk.CTk):
 
             def tarefa():
                 ok, msg = preparo.instalar_ferramentas(
-                    preparo.ferramentas_faltando(),
+                    faltando if opcional else preparo.ferramentas_faltando(),
                     ao_log=lambda t: self._na_ui(
                         lambda: andamento.configure(text=t, text_color=AMARELO)))
                 self._na_ui(terminou, ok, msg)
@@ -326,17 +363,17 @@ class App(ctk.CTk):
 
         # --- Cabeçalho -----------------------------------------------------
         topo = ctk.CTkFrame(self, fg_color="transparent")
-        topo.grid(row=0, column=0, sticky="ew", padx=px, pady=(14, 8))
+        topo.grid(row=0, column=0, sticky="ew", padx=px, pady=(6, 2))
         if os.path.isfile(ICONE_PNG):
             from PIL import Image
             logo = Image.open(ICONE_PNG)
-            self._logo = ctk.CTkImage(light_image=logo, dark_image=logo, size=(34, 34))
+            self._logo = ctk.CTkImage(light_image=logo, dark_image=logo, size=(28, 28))
             ctk.CTkLabel(topo, text="", image=self._logo).pack(side="left")
         ctk.CTkLabel(topo, text="  Clip", text_color=TEXTO,
                      font=(FONTE, 22, "bold")).pack(side="left")
         ctk.CTkLabel(topo, text="Tube", text_color=VERMELHO,
                      font=(FONTE, 22, "bold")).pack(side="left")
-        ctk.CTkLabel(topo, text="   baixador de vídeos do YouTube", text_color=TEXTO_SEC,
+        ctk.CTkLabel(topo, text="   vídeos do YouTube e Instagram", text_color=TEXTO_SEC,
                      font=(FONTE, 12)).pack(side="left", pady=(6, 0))
 
         # --- Cartão do link + prévia --------------------------------------
@@ -351,27 +388,27 @@ class App(ctk.CTk):
             placeholder_text="Cole aqui a url do vídeo",
             placeholder_text_color=TEXTO_APAGADO,
             fg_color=CAMPO, border_width=0, font=(FONTE, 13))
-        self.campo_link.grid(row=0, column=0, sticky="ew", padx=(12, 6), pady=(12, 8))
+        self.campo_link.grid(row=0, column=0, sticky="ew", padx=(12, 6), pady=(10, 6))
         self.campo_link.bind("<Return>", lambda e: self._adicionar_link_digitado())
         self.campo_link.bind("<KeyRelease>", lambda e: self._agendar_previa())
 
         ctk.CTkButton(cartao_link, text="Colar", width=72, height=38, corner_radius=10,
                       fg_color=BOTAO_CINZA, hover_color=BOTAO_CINZA_HOVER,
                       font=(FONTE, 13), command=self._colar).grid(
-            row=0, column=1, padx=3, pady=(12, 8))
+            row=0, column=1, padx=3, pady=(10, 6))
         ctk.CTkButton(cartao_link, text="+ Fila", width=72, height=38, corner_radius=10,
                       fg_color=BOTAO_CINZA, hover_color=BOTAO_CINZA_HOVER,
                       font=(FONTE, 13), command=self._adicionar_link_digitado).grid(
-            row=0, column=2, padx=(3, 12), pady=(12, 8))
+            row=0, column=2, padx=(3, 12), pady=(10, 6))
 
         # Prévia: miniatura à esquerda, título e detalhes à direita
         previa = ctk.CTkFrame(cartao_link, fg_color="transparent")
-        previa.grid(row=1, column=0, columnspan=3, sticky="ew", padx=12, pady=(0, 12))
+        previa.grid(row=1, column=0, columnspan=3, sticky="ew", padx=12, pady=(0, 6))
         previa.grid_columnconfigure(1, weight=1)
 
         self.label_miniatura = ctk.CTkLabel(
             previa, text="sem prévia", image=self._imagem_vazia, compound="center",
-            width=128, height=72, corner_radius=8,
+            width=114, height=64, corner_radius=8,
             fg_color=CAMPO, text_color=TEXTO_SEC, font=(FONTE, 11))
         self.label_miniatura.grid(row=0, column=0, rowspan=3, sticky="w")
 
@@ -386,15 +423,20 @@ class App(ctk.CTk):
 
         linha_qualidade = ctk.CTkFrame(previa, fg_color="transparent")
         linha_qualidade.grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=(4, 0))
-        ctk.CTkLabel(linha_qualidade, text="Qualidade:", text_color=TEXTO_SEC,
-                     font=(FONTE, 12)).pack(side="left", padx=(0, 6))
+        self.label_qualidade = ctk.CTkLabel(linha_qualidade, text="Qualidade:",
+                                            text_color=TEXTO_SEC, font=(FONTE, 12))
+        self.label_qualidade.pack(side="left", padx=(0, 6))
         self.menu_qualidade = ctk.CTkOptionMenu(
             linha_qualidade, values=[QUALIDADE_PADRAO], width=200, height=28,
             corner_radius=8, fg_color=CAMPO, button_color=BOTAO_CINZA,
             button_hover_color=BOTAO_CINZA_HOVER, dropdown_fg_color=CARTAO,
             dropdown_hover_color=BOTAO_CINZA, font=(FONTE, 12), dropdown_font=(FONTE, 12),
-            dynamic_resizing=False, state="disabled")
+            dynamic_resizing=False, state="disabled", command=self._ao_escolher_menu)
         self.menu_qualidade.pack(side="left", fill="x", expand=True)
+
+        # --- Recorte de clip (linha do tempo, quadros de início/fim, prévia) ---
+        self.seletor = clip_ui.SeletorClip(cartao_link, icone=ICONE_ICO)
+        self.seletor.grid(row=2, column=0, columnspan=3, sticky="ew", padx=12, pady=(0, 10))
 
         # --- Pasta de destino --------------------------------------------
         cartao_pasta = ctk.CTkFrame(self, fg_color=CARTAO, corner_radius=14)
@@ -419,7 +461,7 @@ class App(ctk.CTk):
 
         # --- Botões Baixar / Cancelar ------------------------------------
         acoes = ctk.CTkFrame(self, fg_color="transparent")
-        acoes.grid(row=3, column=0, sticky="ew", padx=px, pady=(8, 4))
+        acoes.grid(row=3, column=0, sticky="ew", padx=px, pady=(6, 2))
         acoes.grid_columnconfigure(0, weight=1)
         self.botao_baixar = ctk.CTkButton(
             acoes, text="↓  Baixar", height=48, corner_radius=12,
@@ -430,7 +472,14 @@ class App(ctk.CTk):
             acoes, text="Cancelar", width=110, height=48, corner_radius=12,
             fg_color=BOTAO_CINZA, hover_color=BOTAO_CINZA_HOVER,
             font=(FONTE, 13), state="disabled", command=self._cancelar)
-        self.botao_cancelar.grid(row=0, column=1, padx=(8, 0))
+        self.botao_cancelar.grid(row=0, column=2, padx=(8, 0))
+        self.botao_clipar = ctk.CTkButton(
+            acoes, text="✂  Clipar", width=130, height=48, corner_radius=12,
+            fg_color="transparent", border_width=2, border_color=VERMELHO,
+            hover_color=VERMELHO_HOVER, text_color=TEXTO, text_color_disabled=TEXTO_APAGADO,
+            font=(FONTE, 15, "bold"), state="disabled", command=self._clicar_clipar)
+        self.botao_clipar.grid(row=0, column=1, padx=(8, 0))
+        self._resetar_clip()
 
         # --- Progresso ----------------------------------------------------
         prog = ctk.CTkFrame(self, fg_color="transparent")
@@ -449,7 +498,7 @@ class App(ctk.CTk):
 
         # --- Fila de downloads -------------------------------------------
         cartao_fila = ctk.CTkFrame(self, fg_color=CARTAO, corner_radius=14)
-        cartao_fila.grid(row=5, column=0, sticky="nsew", padx=px, pady=(8, 14))
+        cartao_fila.grid(row=5, column=0, sticky="nsew", padx=px, pady=(6, 10))
         cartao_fila.grid_columnconfigure(0, weight=1)
         cartao_fila.grid_rowconfigure(1, weight=1)
 
@@ -465,7 +514,7 @@ class App(ctk.CTk):
 
         self.lista = ctk.CTkScrollableFrame(cartao_fila, fg_color="transparent",
                                             corner_radius=0, height=80)
-        self.lista.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 8))
+        self.lista.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=6, pady=(0, 6))
         self.lista.grid_columnconfigure(0, weight=1)
         self.label_fila_vazia = ctk.CTkLabel(
             self.lista, text="Nenhum link na fila. Cole vários links e clique em “+ Fila”.",
@@ -510,6 +559,15 @@ class App(ctk.CTk):
                  f"   •   resta {formatar_tempo(dados.get('restante'))}")
 
     # ---------------------------------------------------------------- prévia
+    # ------------------------------------------------------------------ clip
+    def _resetar_clip(self, dica="Cole um link para escolher o trecho do clip."):
+        self.seletor.resetar(dica)
+        self.botao_clipar.configure(state="disabled")
+
+    def _configurar_clip(self, info):
+        ok = self.seletor.configurar(info)
+        self.botao_clipar.configure(state="normal" if ok else "disabled")
+
     def _ler_link(self):
         return self.campo_link.get().strip()
 
@@ -536,17 +594,28 @@ class App(ctk.CTk):
         token = self._token_previa
 
         if not url:
+            self._definir_modo("youtube")
             self._mostrar_previa_vazia()
             return
-        if not eh_link_youtube(url):
-            self._mostrar_previa_vazia("Link inválido. Use um link do YouTube "
-                                       "(youtube.com ou youtu.be).", ERRO)
+        self._definir_modo("instagram" if instagram.eh_instagram(url) else "youtube")
+        invalido = mensagem_link_invalido(url)
+        if invalido:
+            self._mostrar_previa_vazia(invalido, ERRO)
             return
+        if (self._plataforma == "instagram" and not self._ofereceu_gallerydl
+                and not preparo.localizar_ferramenta("gallery-dl")):
+            # Fotos do Instagram precisam do gallery-dl: oferece instalar (uma vez só).
+            self._ofereceu_gallerydl = True
+            self.after(300, lambda: self._abrir_instalacao(
+                [preparo.PACOTE_GALLERYDL], opcional=True,
+                motivo="Para baixar FOTOS do Instagram o ClipTube usa o gallery-dl "
+                       "(vídeos e reels funcionam sem ele)."))
 
-        self.label_titulo.configure(text="Buscando informações do vídeo...", text_color=TEXTO_SEC)
+        self.label_titulo.configure(text="Buscando informações...", text_color=TEXTO_SEC)
         self.label_detalhes.configure(text="")
         self.label_miniatura.configure(image=self._imagem_vazia, text="carregando...")
         self._resetar_qualidades("Carregando qualidades...")
+        self._resetar_clip("Carregando...")
 
         def tarefa():
             try:
@@ -560,10 +629,13 @@ class App(ctk.CTk):
 
         threading.Thread(target=tarefa, daemon=True).start()
 
-    def _obter_info_com_cache(self, url):
+    def _obter_info_com_cache(self, url, login=None):
         if url not in self._cache_info:
             with self._limite_buscas:
-                self._cache_info[url] = dl.obter_info(url)
+                if instagram.eh_instagram(url):
+                    self._cache_info[url] = dl.obter_info(url, login=dict(login or self.login_ig))
+                else:
+                    self._cache_info[url] = dl.obter_info(url)
         return self._cache_info[url]
 
     def _mostrar_previa_vazia(self, texto="Cole um link para ver o título e a miniatura do vídeo.",
@@ -573,14 +645,84 @@ class App(ctk.CTk):
         self.label_titulo.configure(text=texto, text_color=cor)
         self.label_detalhes.configure(text="")
         self._resetar_qualidades()
+        self._resetar_clip(self._dica_clip())
 
+    def _dica_clip(self):
+        if self._plataforma == "instagram":
+            return "Recorte de clip: só para vídeos do YouTube."
+        return "Cole um link para escolher o trecho do clip."
+
+    # ------------------------------------------- linha "Qualidade" / "Login"
     def _resetar_qualidades(self, texto=QUALIDADE_PADRAO):
         self._opcoes_qualidade = []
+        if self._plataforma == "instagram":
+            return          # no Instagram o menu é o do Login e fica sempre ativo
         self.menu_qualidade.configure(values=[texto], state="disabled")
         self.menu_qualidade.set(texto)
 
+    def _textos_login(self):
+        """Opções do menu Login (a de cookies.txt mostra o nome do arquivo escolhido)."""
+        textos = []
+        for texto, modo in instagram.OPCOES_LOGIN:
+            if modo == "arquivo" and self.login_ig.get("modo") == "arquivo":
+                texto = instagram.texto_do_login(self.login_ig)
+            textos.append(texto)
+        return textos
+
+    def _definir_modo(self, plataforma):
+        """Troca a linha de baixo da prévia entre "Qualidade:" (YouTube) e "Login:" (Instagram)."""
+        if plataforma == self._plataforma:
+            return
+        self._plataforma = plataforma
+        if plataforma == "instagram":
+            self.label_qualidade.configure(text="Login:")
+            self.menu_qualidade.configure(values=self._textos_login(), state="normal")
+            self.menu_qualidade.set(instagram.texto_do_login(self.login_ig))
+            self._opcoes_qualidade = []
+            self._resetar_clip(self._dica_clip())
+            self.botao_clipar.configure(state="disabled")
+            # Recorte de clip é só do YouTube: esconde a área e o botão (a fila ganha espaço)
+            self.seletor.grid_remove()
+            self.botao_clipar.grid_remove()
+        else:
+            self.label_qualidade.configure(text="Qualidade:")
+            self._resetar_qualidades()
+            self.seletor.grid()
+            self.botao_clipar.grid()
+
+    def _ao_escolher_menu(self, valor):
+        """O menu serve para duas coisas; só o Login do Instagram precisa reagir ao clique."""
+        if self._plataforma != "instagram":
+            return
+        modo = next((m for t, m in instagram.OPCOES_LOGIN if t == valor), None)
+        if modo is None and valor.startswith("Arquivo:"):
+            modo = "arquivo"            # clicou no arquivo atual: deixa escolher outro
+        if modo == "arquivo":
+            caminho = filedialog.askopenfilename(
+                title="Escolha o arquivo cookies.txt (exportado do navegador)",
+                filetypes=[("Cookies (txt)", "*.txt"), ("Todos os arquivos", "*.*")])
+            if not caminho:
+                self.menu_qualidade.set(instagram.texto_do_login(self.login_ig))
+                return
+            self.login_ig = {"modo": "arquivo", "arquivo": os.path.normpath(caminho)}
+        else:
+            self.login_ig = {"modo": modo, "arquivo": self.login_ig.get("arquivo", "")}
+        self.config_app["login_instagram"] = self.login_ig
+        salvar_config(self.config_app)
+        self.menu_qualidade.configure(values=self._textos_login())
+        self.menu_qualidade.set(instagram.texto_do_login(self.login_ig))
+        # Mudou o login: tenta ler o post de novo
+        for url in [u for u in self._cache_info if instagram.eh_instagram(u)]:
+            self._cache_info.pop(url, None)
+        if self._agendamento_previa:
+            self.after_cancel(self._agendamento_previa)
+            self._agendamento_previa = None
+        self._buscar_previa()
+
     def _qualidade_escolhida(self):
         """Retorna (limite_res, rotulo_curto) da opção selecionada no menu."""
+        if self._plataforma == "instagram":
+            return None, "Instagram"
         atual = self.menu_qualidade.get()
         for texto, limite, curto in self._opcoes_qualidade:
             if texto == atual:
@@ -593,16 +735,26 @@ class App(ctk.CTk):
         self.label_titulo.configure(text=encurtar(info["titulo"], 110), text_color=TEXTO)
         partes = [p for p in (info.get("canal"),
                               formatar_tempo(info["duracao"]) if info.get("duracao") else None) if p]
+        if info.get("plataforma") == "instagram":
+            partes = [p for p in (info.get("canal"),
+                                  instagram.descricao_midia(info.get("fotos", 0), info.get("videos", 0)),
+                                  formatar_tempo(info["duracao"]) if info.get("duracao") else None) if p]
         self.label_detalhes.configure(text="   •   ".join(partes))
         self._opcoes_qualidade = montar_opcoes_qualidade(info.get("qualidades") or [])
-        if self._opcoes_qualidade:
+        if info.get("plataforma") == "instagram":
+            pass                      # no Instagram não há escolha de qualidade nem recorte
+        elif self._opcoes_qualidade:
             textos = [t for t, _, _ in self._opcoes_qualidade]
             self.menu_qualidade.configure(values=textos, state="normal")
             self.menu_qualidade.set(textos[0])   # padrão: qualidade original do vídeo
         else:
             self._resetar_qualidades()
+        if info.get("plataforma") == "instagram":
+            self._resetar_clip(self._dica_clip())
+        else:
+            self._configurar_clip(info)
         if imagem is not None:
-            self._imagem_previa = ctk.CTkImage(light_image=imagem, dark_image=imagem, size=(128, 72))
+            self._imagem_previa = ctk.CTkImage(light_image=imagem, dark_image=imagem, size=(114, 64))
             self.label_miniatura.configure(image=self._imagem_previa, text="")
         else:
             self.label_miniatura.configure(image=self._imagem_vazia, text="sem miniatura")
@@ -632,8 +784,9 @@ class App(ctk.CTk):
         if not url:
             self._definir_status("Cole um link primeiro.", AMARELO)
             return False
-        if not eh_link_youtube(url):
-            self._definir_status("Link inválido. Use um link do YouTube.", ERRO)
+        invalido = mensagem_link_invalido(url)
+        if invalido:
+            self._definir_status(invalido, ERRO)
             return False
         limite, curto = self._qualidade_escolhida()
         self._adicionar_links([url], limite, curto)
@@ -641,17 +794,46 @@ class App(ctk.CTk):
         self._definir_status(f"Link adicionado à fila ({curto}).", TEXTO_SEC)
         return True
 
-    def _adicionar_links(self, links, limite_res=None, rotulo="Original"):
-        """Adiciona links do YouTube à fila (ignora repetidos que ainda não foram baixados)."""
-        pendentes = {i.url for i in self.fila if i.status in ("aguardando", "baixando")}
+    def _clicar_clipar(self):
+        """Coloca na fila um clip do trecho escolhido (e começa a baixar)."""
+        url = self._ler_link()
+        trecho = self.seletor.trecho()
+        if not url or not eh_link_youtube(url) or not trecho:
+            self._definir_status("Cole o link e espere carregar o vídeo para criar o clip.", AMARELO)
+            return
+        ini, fim = trecho
+        if fim - ini < 1:
+            self._definir_status("Escolha um trecho de pelo menos 1 segundo.", AMARELO)
+            return
+        limite, curto = self._qualidade_escolhida()
+        rotulo = f"✂ {clip_ui.fmt(ini)}–{clip_ui.fmt(fim)} • {curto}"
+        if not self._adicionar_links([url], limite, rotulo, ini, fim):
+            self._definir_status("Esse mesmo clip já está na fila.", AMARELO)
+            return
+        # O link continua no campo: dá para escolher outro trecho e clipar de novo.
+        self._definir_status(f"Clip {clip_ui.fmt(ini)}–{clip_ui.fmt(fim)} adicionado à fila.",
+                             TEXTO_SEC)
+        self._iniciar_fila()
+
+    def _adicionar_links(self, links, limite_res=None, rotulo="Original", inicio=None, fim=None):
+        """Adiciona links do YouTube/Instagram à fila (ignora repetidos que ainda não foram baixados).
+        Com inicio/fim, o item é um clip só desse trecho."""
+        def chave(i):
+            return (i.url, i.inicio, i.fim, i.limite_res)
+        pendentes = {chave(i) for i in self.fila if i.status in ("aguardando", "baixando")}
         adicionados = 0
         for url in links:
             url = url.strip()
-            if not eh_link_youtube(url) or url in pendentes:
+            if mensagem_link_invalido(url):
                 continue
-            item = ItemFila(url, limite_res, rotulo)
+            if instagram.eh_instagram(url):          # Instagram: sem qualidade, com login
+                item = ItemFila(url, None, "Instagram", login=dict(self.login_ig))
+            else:
+                item = ItemFila(url, limite_res, rotulo, inicio, fim)
+            if chave(item) in pendentes:
+                continue
             self.fila.append(item)
-            pendentes.add(url)
+            pendentes.add(chave(item))
             self._criar_linha(item)
             self._buscar_titulo_item(item)
             adicionados += 1
@@ -662,7 +844,7 @@ class App(ctk.CTk):
         """Busca o título de um item da fila em segundo plano."""
         def tarefa():
             try:
-                info = self._obter_info_com_cache(item.url)
+                info = self._obter_info_com_cache(item.url, item.login)
                 item.titulo = info["titulo"]
                 self._na_ui(self._ao_receber_titulo, item)
             except Exception:
@@ -755,7 +937,7 @@ class App(ctk.CTk):
                 return
         if not any(i.status == "aguardando" for i in self.fila):
             if not self.trabalhando:
-                self._definir_status("Cole um link do YouTube primeiro.", AMARELO)
+                self._definir_status("Cole um link do YouTube ou do Instagram primeiro.", AMARELO)
             return
         self._iniciar_fila()
 
@@ -794,6 +976,7 @@ class App(ctk.CTk):
                     ao_progresso=ao_progresso,
                     ao_etapa=lambda t, it=item: self._na_ui(self._mostrar_etapa, it, t),
                     limite_res=item.limite_res,
+                    inicio=item.inicio, fim=item.fim, login=item.login,
                 )
                 item.status = "ja_existia" if resultado == "ja_existia" else "concluido"
                 item.mensagem = ""
@@ -834,8 +1017,9 @@ class App(ctk.CTk):
             self._definir_status(item.mensagem, ERRO)
         else:
             self.barra.set(1)
+            coisa = "clip" if item.inicio is not None else "vídeo"
             self._definir_status("Concluído!" if item.status == "concluido"
-                                 else "Concluído! (o vídeo já estava na pasta)", VERDE)
+                                 else f"Concluído! (esse {coisa} já estava na pasta)", VERDE)
 
     def _ao_terminar_fila(self, baixados, erros, cancelado):
         self.trabalhando = False

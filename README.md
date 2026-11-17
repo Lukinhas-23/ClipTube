@@ -1,6 +1,14 @@
 # ClipTube
 
-ClipTube é um app com interface gráfica que baixa vídeos do YouTube usando o yt-dlp.
+ClipTube é um app com interface gráfica que baixa vídeos do YouTube (e vídeos e fotos do Instagram) usando o yt-dlp.
+
+## Como abrir (depois de baixar do GitHub)
+
+1. Baixe o projeto: no GitHub clique em **Code → Download ZIP** e extraia a pasta (ou use `git clone https://github.com/Lukinhas-23/ClipTube.git`).
+2. Dê dois cliques em **`ClipTube.bat`**, dentro da pasta. O app abre sem janela de terminal e funciona de qualquer lugar onde você colocar a pasta.
+3. Na primeira vez, o `ClipTube.bat` cria na mesma pasta um atalho **ClipTube** com o ícone do app. Dali em diante pode abrir por esse atalho, copiá-lo para a Área de Trabalho ou fixá-lo na barra de tarefas.
+
+Se o Python não estiver instalado, o `ClipTube.bat` avisa e mostra o comando para instalar (`winget install Python.Python.3.12`).
 
 ## Instalação (automática na primeira vez)
 
@@ -11,7 +19,7 @@ Na primeira vez que o ClipTube abre, ele mesmo prepara tudo:
 - **Bibliotecas Python** (customtkinter e pillow): instaladas com o pip, numa janelinha de andamento. No `.exe` elas já vêm dentro.
 - **yt-dlp e FFmpeg**: se faltarem, o app mostra uma janela "Primeira configuração" e instala os dois com o winget quando você clica em **Instalar agora**. Se a instalação falhar, aparece o motivo e o botão **Tentar de novo**.
 
-Depois disso, nada mais é instalado. Para abrir: `python app.py` (ou gere o `.exe`, veja abaixo).
+Depois disso, nada mais é instalado. Para abrir: `ClipTube.bat` (ou `python app.py`, ou gere o `.exe`, veja abaixo).
 
 Se preferir instalar na mão:
 
@@ -20,6 +28,37 @@ python -m pip install -r requirements.txt
 winget install yt-dlp.yt-dlp
 winget install yt-dlp.FFmpeg
 ```
+
+### Instagram (vídeos, reels, stories e fotos)
+
+Cole o link de um **post, reel ou story** do Instagram no mesmo campo. O ClipTube reconhece sozinho:
+
+- **Vídeos e reels** baixam pelo yt-dlp, em MP4 H.264 + AAC. Se o post tiver vários vídeos, todos são baixados.
+- **Fotos** (e posts com várias fotos) baixam pelo **gallery-dl**. Na primeira vez que você colar um link do Instagram, o app oferece instalar o gallery-dl com o winget (uma vez só).
+- Os arquivos ficam na pasta de destino com o nome `usuario_post_número.jpg` (fotos) ou `usuario - id.mp4` (vídeos).
+- No Instagram não há escolha de qualidade nem recorte de clip (isso é só do YouTube).
+
+**Login:** o Instagram quase sempre exige uma conta logada. No menu **Login** (no lugar de "Qualidade") escolha:
+
+- **Chrome / Edge / Firefox:** o app usa o login do navegador onde você já está logado no Instagram. Ele nunca vê nem guarda sua senha: só entrega os cookies do navegador ao yt-dlp/gallery-dl na hora de baixar. O app começa em **Sem login** e só lê um navegador depois que você escolher.
+- **Arquivo cookies.txt…:** exporte os cookies do Instagram com uma extensão de navegador (por exemplo "Get cookies.txt LOCALLY") e escolha o arquivo. Use esta opção se o Chrome/Edge der erro: as versões novas desses navegadores bloqueiam a leitura dos cookies (o Firefox costuma funcionar melhor). **Nunca coloque o cookies.txt no GitHub:** quem tiver esse arquivo entra na sua conta. O `.gitignore` já ignora `cookies*.txt`.
+
+Limites: posts de contas privadas só baixam se a conta logada seguir o perfil; perfis inteiros e destaques não são suportados; o Instagram muda com frequência, então às vezes é preciso atualizar (`winget upgrade yt-dlp` e `winget upgrade mikf.gallery-dl`). Use só para conteúdo seu ou para uso pessoal, respeitando os direitos do autor.
+
+### Clips (recortar um trecho)
+
+Depois de colar o link, a área **✂ Recortar clip** mostra o vídeo inteiro numa linha do tempo com miniaturas:
+
+- **Arraste as alças vermelhas** para escolher o início e o fim. Arraste o **meio** da faixa para mover o clip todo sem mudar o tamanho. Clicar fora leva a alça mais próxima até ali.
+- Os dois quadros embaixo mostram **como é a imagem no início e no fim** do clip, com o tempo exato.
+- Ajuste fino: botões **−1s / +1s** ou digite o tempo (`1:25`, `01:25.5`, `1:02:03`).
+- **🔍 Ampliar trecho** dá zoom na região escolhida (e **↔ Ver tudo** volta).
+- **▶ Ver prévia** abre um player que toca o clip (imagem e som) para você conferir antes de baixar. Se o clip tiver mais de 5 minutos, a prévia toca só os 5 primeiros.
+- **✂ Clipar** baixa só esse trecho (não o vídeo inteiro) na pasta de destino, em **MP4 H.264 + AAC**, na qualidade escolhida no menu. O corte é exato e o arquivo se chama `Título [id] clip 01m40s-01m52s.mp4`.
+- O link continua no campo depois de clipar: dá para escolher outro trecho e clipar de novo. Cada clip entra na fila com uma etiqueta do trecho.
+- **Baixar** continua baixando o vídeo inteiro.
+
+As miniaturas e a prévia vêm direto do YouTube (sem baixar o vídeo todo), então aparecem rápido.
 
 ### Qualidade
 
@@ -44,20 +83,27 @@ Original  •  2160p (4K)  •  60fps  •  ≈ 2.1 GB  •  converte H.264
 
 | Arquivo | Para que serve |
 |---|---|
+| `ClipTube.bat` | **Abre o app** (dois cliques). Cria o atalho ClipTube com ícone na primeira vez |
 | `app.py` | A janela (interface, fila, prévia, barra de progresso) |
 | `downloader.py` | Conversa com o yt-dlp: busca informações, baixa, traduz erros |
+| `clip_ui.py` | A área de recorte: linha do tempo, alças, quadros de início/fim e o player da prévia |
+| `previas.py` | Miniaturas (storyboard), quadro exato e player da prévia, sem baixar o vídeo todo |
+| `tema.py` | Cores e fonte do app |
+| `instagram.py` | Regras do Instagram: links, login por cookies, erros em português |
 | `preparo.py` | Configuração da primeira vez: instala bibliotecas (pip) e yt-dlp/FFmpeg (winget) |
 | `dist\ClipTube.exe` | Gerado pelo `gerar_exe.bat`: o app em um arquivo só, com ícone |
 | `gerar_exe.bat` | Gera o `ClipTube.exe` (com ícone) |
 | `assets\` | Ícone do app: `icone_original.jpg` (arte oficial), `icone.ico`/`icone.png` (gerados) e `criar_icone.py` |
 | `requirements.txt` | Bibliotecas Python necessárias |
-| `config.json` | Criado automaticamente; guarda a última pasta escolhida |
+| `config.json` | Criado automaticamente; guarda a última pasta escolhida e o login do Instagram |
 
 ## Como usar
 
-1. Abra o `ClipTube.exe` (veja "Gerar o .exe") ou rode `python app.py`.
+1. Dê dois cliques em `ClipTube.bat` (ou no atalho ClipTube que ele cria, ou no `ClipTube.exe`, veja "Gerar o .exe").
 2. Clique em **Colar** (ou cole com Ctrl+V) e a miniatura e o título aparecem.
 3. Clique em **Baixar**.
+
+A pasta de destino começa em `D:\Clips IShowSpeed certa` (ou em `Vídeos\ClipTube`, se o computador não tiver disco D:). Use **Escolher pasta** para trocar; o app lembra da última escolhida.
 
 **Fila:** para baixar vários vídeos, cole um link e clique em **+ Fila** (ou aperte Enter) para cada um.
 Se você copiar vários links de uma vez (um por linha) e clicar em **Colar**, todos entram na fila direto.
