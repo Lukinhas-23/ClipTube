@@ -9,8 +9,8 @@ ClipTube é um app com interface gráfica que baixa vídeos do YouTube, vídeos 
 3. **Na primeira vez** o `ClipTube.bat` abre uma janela preta e **instala tudo sozinho** (precisa de internet, pode levar alguns minutos; não feche a janela):
    - o **Python**, se o computador não tiver (pelo winget);
    - as bibliotecas do app (customtkinter e pillow);
-   - o **yt-dlp** e o **FFmpeg**, que baixam e convertem os vídeos;
-   - o **gallery-dl**, que baixa as fotos do Instagram.
+   - o **yt-dlp** e o **gallery-dl** (baixam os vídeos e as fotos do Instagram), instalados como bibliotecas do Python;
+   - o **FFmpeg** (converte e junta vídeo e áudio) e o **Deno** (o YouTube exige), pelo winget.
    Quando termina, o app abre. Nas próximas vezes ele abre direto, sem janela preta.
 4. O `ClipTube.bat` também cria na pasta um atalho **ClipTube** com o ícone do app. Dali em diante pode abrir por esse atalho, copiá-lo para a Área de Trabalho ou fixá-lo na barra de tarefas.
 
@@ -31,9 +31,11 @@ Se preferir instalar na mão:
 
 ```
 python -m pip install -r requirements.txt
-winget install yt-dlp.yt-dlp
 winget install yt-dlp.FFmpeg
+winget install DenoLand.Deno
 ```
+
+**Por que o yt-dlp e o gallery-dl vão como biblioteca do Python (e não como `.exe`)?** O Windows (Controle inteligente de aplicativo / Controle de Aplicativo) bloqueia programas `.exe` que não tem assinatura digital, e isso quebrava os downloads em alguns computadores. Rodando dentro do `python.exe`, que o Windows aceita, o problema some. Se a biblioteca não estiver instalada, o app ainda tenta o `.exe` como plano B.
 
 ### Twitch (gravações inteiras da live e clips)
 
@@ -61,7 +63,7 @@ Cole o link de um **post, reel ou story** do Instagram no mesmo campo. O ClipTub
 - **Chrome / Edge / Firefox:** o app usa o login do navegador onde você já está logado no Instagram. Ele nunca vê nem guarda sua senha: só entrega os cookies do navegador ao yt-dlp/gallery-dl na hora de baixar. O app começa em **Sem login** e só lê um navegador depois que você escolher.
 - **Arquivo cookies.txt…:** exporte os cookies do Instagram com uma extensão de navegador (por exemplo "Get cookies.txt LOCALLY") e escolha o arquivo. Use esta opção se o Chrome/Edge der erro: as versões novas desses navegadores bloqueiam a leitura dos cookies (o Firefox costuma funcionar melhor). **Nunca coloque o cookies.txt no GitHub:** quem tiver esse arquivo entra na sua conta. O `.gitignore` já ignora `cookies*.txt`.
 
-Limites: posts de contas privadas só baixam se a conta logada seguir o perfil; perfis inteiros e destaques não são suportados; o Instagram muda com frequência, então às vezes é preciso atualizar (`winget upgrade yt-dlp` e `winget upgrade mikf.gallery-dl`). Use só para conteúdo seu ou para uso pessoal, respeitando os direitos do autor.
+Limites: posts de contas privadas só baixam se a conta logada seguir o perfil; perfis inteiros e destaques não são suportados; o Instagram muda com frequência, então às vezes é preciso atualizar (`python -m pip install -U yt-dlp gallery-dl`). Use só para conteúdo seu ou para uso pessoal, respeitando os direitos do autor.
 
 ### Clips (recortar um trecho)
 
@@ -109,6 +111,7 @@ Original  •  2160p (4K)  •  60fps  •  ≈ 2.1 GB  •  converte H.264
 | `tema.py` | Cores e fonte do app |
 | `instagram.py` | Regras do Instagram: links, login por cookies, erros em português |
 | `twitch.py` | Regras da Twitch: gravações e clips, recusa de links de canal, erros em português |
+| `diagnostico.bat` / `diagnostico.py` | Testam leitura, download e clip e gravam `diagnostico.txt` (para achar a causa de erros) |
 | `preparo.py` | Instalação da primeira vez: bibliotecas (pip), yt-dlp, FFmpeg e gallery-dl (winget). Também roda sozinho: `python preparo.py --instalar` |
 | `dist\ClipTube.exe` | Gerado pelo `gerar_exe.bat`: o app em um arquivo só, com ícone |
 | `gerar_exe.bat` | Gera o `ClipTube.exe` (com ícone) |
@@ -132,6 +135,13 @@ Você pode adicionar links enquanto outro download está rodando. Eles são baix
 - Se um item der erro, passe o mouse em **"Erro ⓘ"** para ver o motivo.
 - **Abrir pasta** abre a pasta de destino no Explorer. O botão fica vermelho por alguns segundos quando um download termina.
 
+## Se der erro
+
+1. **Clique no erro.** Na fila, clique em **"Erro ⓘ"**; na prévia, clique na mensagem vermelha. Abre uma janela com o **texto técnico completo** do erro e as versões das ferramentas. Use **Copiar tudo** e mande para quem estiver ajudando.
+2. **Arquivo de erros:** todo erro fica gravado em `cliptube_erros.log`, na pasta do ClipTube (botão **Abrir arquivo de erros**).
+3. **Diagnóstico:** dê dois cliques em **`diagnostico.bat`**. Ele testa ler um vídeo, baixar e criar um clip, e grava o resultado em `diagnostico.txt`. Mande esse arquivo.
+4. **"O Windows bloqueou um dos programas" (erro 4551):** o Windows barra programas sem assinatura digital. O ClipTube já evita isso no yt-dlp e no gallery-dl (usa a versão em Python), mas pode acontecer com o FFmpeg ou o Deno. Se o computador é seu: Segurança do Windows → Controle de aplicativos e navegador → Configurações do Controle inteligente de aplicativo → **Desativado** (depois de desativar, só dá para ligar de novo reinstalando o Windows). Se é de empresa ou escola, peça ao administrador de TI para liberar o `ffmpeg.exe` e o `deno.exe`.
+
 ## Gerar o .exe (abrir sem terminal)
 
 Dê dois cliques em **`gerar_exe.bat`**. Leva uns 1–2 minutos. O executável fica em:
@@ -152,11 +162,10 @@ O `config.json` é criado ao lado do `.exe`.
 
 ## Observações
 
-- O app usa o **yt-dlp e o FFmpeg instalados pelo winget**. Para atualizar (resolve a maioria dos erros novos do YouTube):
+- O app usa o **yt-dlp** (biblioteca Python) e o **FFmpeg** (winget). Para atualizar o yt-dlp (resolve a maioria dos erros novos do YouTube):
   ```
-  winget upgrade yt-dlp
+  python -m pip install -U yt-dlp
   ```
-  Não é preciso gerar o .exe de novo depois de atualizar.
 - Foi adicionado `--no-playlist`: um link com `&list=...` baixa só aquele vídeo, não a playlist inteira.
 - Se o YouTube recusar o download (erro 403, que acontece de vez em quando), o app tenta de novo sozinho até 3 vezes.
 

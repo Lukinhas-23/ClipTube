@@ -14,9 +14,11 @@ Como funciona, em resumo:
 
 import json
 import os
+import platform
 import re
 import shutil
 import sys
+import traceback
 import threading
 import time
 import queue
@@ -74,6 +76,7 @@ def recurso(caminho_relativo):
 
 
 ARQUIVO_CONFIG = os.path.join(pasta_do_app(), "config.json")
+ARQUIVO_LOG = os.path.join(pasta_do_app(), "cliptube_erros.log")
 ICONE_ICO = recurso(os.path.join("assets", "icone.ico"))
 ICONE_PNG = recurso(os.path.join("assets", "icone.png"))
 
@@ -92,6 +95,23 @@ def salvar_config(config):
             json.dump(config, f, ensure_ascii=False, indent=2)
     except Exception:
         pass  # não conseguir salvar a config não deve quebrar o app
+
+
+def registrar_log_erro(url, mensagem, detalhes, contexto=""):
+    """Guarda o erro (com o texto técnico completo) em cliptube_erros.log, para diagnóstico."""
+    try:
+        agora = time.strftime("%Y-%m-%d %H:%M:%S")
+        bloco = (f"===== {agora} =====\nLink: {url}\n{contexto}Mensagem: {mensagem}\n"
+                 f"--- saida tecnica ---\n{(detalhes or '(vazia)').strip()}\n\n")
+        if os.path.exists(ARQUIVO_LOG) and os.path.getsize(ARQUIVO_LOG) > 400_000:
+            with open(ARQUIVO_LOG, "r", encoding="utf-8", errors="replace") as f:
+                resto = f.read()[-150_000:]
+            with open(ARQUIVO_LOG, "w", encoding="utf-8") as f:
+                f.write(resto)
+        with open(ARQUIVO_LOG, "a", encoding="utf-8") as f:
+            f.write(bloco)
+    except Exception:
+        pass            # o log nunca pode atrapalhar o app
 
 
 def eh_link_youtube(texto):
@@ -203,6 +223,7 @@ class ItemFila:
         self.titulo = None
         self.status = "aguardando"
         self.mensagem = ""          # detalhe do erro, se houver
+        self.detalhes = ""          # texto técnico completo do erro (yt-dlp/gallery-dl)
         self.widgets = None         # (frame, label_titulo, label_status, botao_remover, label_qualidade)
 
 
@@ -235,6 +256,7 @@ class App(ctk.CTk):
         self._ultimo_link = ""
         self._opcoes_qualidade = []   # [(texto, limite_res, rotulo_curto)] do link atual
         self._plataforma = "youtube"  # o que a linha "Qualidade/Login" mostra agora
+        self._erro_previa = None      # item de erro da prévia atual (para o clique em "detalhes")
         self._ofereceu_gallerydl = False
         self.login_ig = {**instagram.LOGIN_PADRAO,
                          **(self.config_app.get("login_instagram") or {})}
@@ -283,7 +305,7 @@ class App(ctk.CTk):
         texto = ctk.CTkLabel(
             janela, text=f"{descricao}\n"
                          "Posso instalar para você agora "
-                         "(usa o winget, pode demorar alguns minutos).",
+                         "(pode demorar alguns minutos).",
             text_color=TEXTO_SEC, font=(FONTE, 13), justify="center", wraplength=410)
         texto.pack(padx=20)
         andamento = ctk.CTkLabel(janela, text="", text_color=AMARELO, font=(FONTE, 12),
@@ -421,6 +443,7 @@ class App(ctk.CTk):
             anchor="w", justify="left", wraplength=470, text_color=TEXTO,
             font=(FONTE, 14, "bold"))
         self.label_titulo.grid(row=0, column=1, sticky="sw", padx=(12, 0))
+        self.label_titulo.bind("<Button-1>", lambda e: self._clicou_titulo())
         self.label_detalhes = ctk.CTkLabel(
             previa, text="", anchor="w", text_color=TEXTO_SEC, font=(FONTE, 12))
         self.label_detalhes.grid(row=1, column=1, sticky="nw", padx=(12, 0))
@@ -608,7 +631,7 @@ class App(ctk.CTk):
             self._mostrar_previa_vazia(invalido, ERRO)
             return
         if (self._plataforma == "instagram" and not self._ofereceu_gallerydl
-                and not preparo.localizar_ferramenta("gallery-dl")):
+                and not preparo.comando_gallerydl()):
             # Fotos do Instagram precisam do gallery-dl: oferece instalar (uma vez só).
             self._ofereceu_gallerydl = True
             self.after(300, lambda: self._abrir_instalacao(
@@ -628,9 +651,14 @@ class App(ctk.CTk):
                 imagem = dl.baixar_miniatura(info.get("miniatura"))
                 self._na_ui(self._mostrar_previa, token, info, imagem)
             except dl.ErroDownload as e:
-                self._na_ui(self._mostrar_erro_previa, token, str(e))
+                detalhes = getattr(e, "original", "") or ""
+                registrar_log_erro(url, str(e), detalhes, "Etapa: ler informacoes do link\n")
+                self._na_ui(self._mostrar_erro_previa, token, str(e), url, detalhes)
             except Exception as e:
-                self._na_ui(self._mostrar_erro_previa, token, f"Erro ao ler o vídeo: {e}")
+                detalhes = traceback.format_exc()
+                msg = dl.MSG_BLOQUEIO_WINDOWS if dl.eh_bloqueio_windows(e) else f"Erro ao ler o vídeo: {e}"
+                registrar_log_erro(url, msg, detalhes, "Etapa: ler informacoes do link\n")
+                self._na_ui(self._mostrar_erro_previa, token, msg, url, detalhes)
 
         threading.Thread(target=tarefa, daemon=True).start()
 
@@ -645,6 +673,8 @@ class App(ctk.CTk):
 
     def _mostrar_previa_vazia(self, texto="Cole um link para ver o título e a miniatura do vídeo.",
                               cor=TEXTO):
+        self._erro_previa = None
+        self.label_titulo.configure(cursor="")
         self.label_miniatura.configure(image=self._imagem_vazia, text="sem prévia")
         self._imagem_previa = None
         self.label_titulo.configure(text=texto, text_color=cor)
@@ -771,10 +801,18 @@ class App(ctk.CTk):
         else:
             self.label_miniatura.configure(image=self._imagem_vazia, text="sem miniatura")
 
-    def _mostrar_erro_previa(self, token, mensagem):
+    def _mostrar_erro_previa(self, token, mensagem, url="", detalhes=""):
         if token != self._token_previa:
             return
-        self._mostrar_previa_vazia(mensagem, ERRO)
+        self._mostrar_previa_vazia(f"{mensagem}  (clique aqui para ver os detalhes)", ERRO)
+        erro = ItemFila(url)
+        erro.mensagem, erro.detalhes = mensagem, detalhes
+        self._erro_previa = erro
+        self.label_titulo.configure(cursor="hand2")
+
+    def _clicou_titulo(self):
+        if self._erro_previa is not None:
+            self._mostrar_detalhes_erro(self._erro_previa)
 
     # ----------------------------------------------------------- link/fila
     def _colar(self):
@@ -902,6 +940,8 @@ class App(ctk.CTk):
         # Mostra o detalhe do erro ao passar o mouse
         if item.status == "erro":
             status.bind("<Enter>", lambda e: self._definir_status(item.mensagem, ERRO))
+            status.bind("<Button-1>", lambda e: self._mostrar_detalhes_erro(item))
+            status.configure(cursor="hand2")
         remover.configure(state="disabled" if item.status == "baixando" else "normal")
 
     def _remover_item(self, item):
@@ -1007,13 +1047,74 @@ class App(ctk.CTk):
                 return
             except dl.ErroDownload as e:
                 item.status, item.mensagem = "erro", str(e)
+                item.detalhes = getattr(e, "original", "") or ""
                 erros += 1
             except Exception as e:
-                item.status, item.mensagem = "erro", f"Erro inesperado: {e}"
+                item.status = "erro"
+                item.mensagem = dl.MSG_BLOQUEIO_WINDOWS if dl.eh_bloqueio_windows(e) \
+                    else f"Erro inesperado: {e}"
+                item.detalhes = traceback.format_exc()
                 erros += 1
+            if item.status == "erro":
+                registrar_log_erro(item.url, item.mensagem, item.detalhes, self._contexto_item(item))
             self._na_ui(self._ao_terminar_item, item)
 
         self._na_ui(self._ao_terminar_fila, baixados, erros, False)
+
+    def _contexto_item(self, item):
+        partes = [f"Qualidade: {item.rotulo_qualidade}"]
+        if item.inicio is not None:
+            partes.append(f"Clip: {clip_ui.fmt(item.inicio)} a {clip_ui.fmt(item.fim)}")
+        partes.append(f"Pasta de destino: {self.pasta}")
+        return "\n".join(partes) + "\n"
+
+    def _mostrar_detalhes_erro(self, item):
+        """Janela com o texto técnico do erro (para copiar e mandar para quem for ajudar)."""
+        janela = ctk.CTkToplevel(self)
+        janela.title("ClipTube — detalhes do erro")
+        janela.geometry("660x480")
+        janela.configure(fg_color=FUNDO)
+        janela.transient(self)
+        janela.after(250, lambda: janela.iconbitmap(ICONE_ICO) if os.path.isfile(ICONE_ICO) else None)
+        ctk.CTkLabel(janela, text="Detalhes do erro", text_color=TEXTO,
+                     font=(FONTE, 16, "bold")).pack(anchor="w", padx=16, pady=(14, 2))
+        ctk.CTkLabel(janela, text="Clique em “Copiar tudo” e mande esse texto para quem estiver ajudando.",
+                     text_color=TEXTO_SEC, font=(FONTE, 12)).pack(anchor="w", padx=16)
+        caixa = ctk.CTkTextbox(janela, font=("Consolas", 11), fg_color=CAMPO, text_color=TEXTO,
+                               wrap="word", corner_radius=10)
+        caixa.pack(fill="both", expand=True, padx=16, pady=10)
+        bloqueio = dl.eh_bloqueio_windows(item.mensagem) or dl.eh_bloqueio_windows(item.detalhes)
+        base = ((dl.COMO_RESOLVER_BLOQUEIO if bloqueio else "") +
+                f"Mensagem: {item.mensagem}\nLink: {item.url}\n{self._contexto_item(item)}\n"
+                f"--- Saída técnica (yt-dlp/gallery-dl) ---\n{(item.detalhes or '(vazia)').strip()}\n\n"
+                f"--- Ambiente ---\n")
+        caixa.insert("end", base + "Verificando as ferramentas...")
+
+        def preencher():
+            texto = base + dl.info_ambiente()
+            def atualizar():
+                caixa.delete("1.0", "end")
+                caixa.insert("end", texto)
+            self._na_ui(atualizar)
+        threading.Thread(target=preencher, daemon=True).start()
+
+        def copiar():
+            self.clipboard_clear()
+            self.clipboard_append(caixa.get("1.0", "end").strip())
+            botao_copiar.configure(text="Copiado!")
+        botoes = ctk.CTkFrame(janela, fg_color="transparent")
+        botoes.pack(pady=(0, 14))
+        botao_copiar = ctk.CTkButton(botoes, text="Copiar tudo", width=130, height=34, corner_radius=9,
+                                     fg_color=VERMELHO, hover_color=VERMELHO_HOVER,
+                                     font=(FONTE, 13, "bold"), command=copiar)
+        botao_copiar.pack(side="left", padx=5)
+        ctk.CTkButton(botoes, text="Abrir arquivo de erros", width=160, height=34, corner_radius=9,
+                      fg_color=BOTAO_CINZA, hover_color=BOTAO_CINZA_HOVER, font=(FONTE, 13),
+                      command=lambda: os.path.exists(ARQUIVO_LOG) and os.startfile(ARQUIVO_LOG)
+                      ).pack(side="left", padx=5)
+        ctk.CTkButton(botoes, text="Fechar", width=100, height=34, corner_radius=9,
+                      fg_color=BOTAO_CINZA, hover_color=BOTAO_CINZA_HOVER, font=(FONTE, 13),
+                      command=janela.destroy).pack(side="left", padx=5)
 
     def _verificar_espaco(self, item, pasta):
         """Avisa antes de começar se o disco não tem espaço para o tamanho estimado

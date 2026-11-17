@@ -12,10 +12,13 @@ passa a usar a versão nova automaticamente (sem precisar recompilar o .exe).
 O FFmpeg instalado é encontrado pelo próprio yt-dlp para juntar vídeo + áudio.
 """
 
+import functools
 import json
 import re
 import os
+import platform
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -24,7 +27,7 @@ from io import BytesIO
 
 import instagram
 import twitch
-from preparo import localizar_ferramenta
+from preparo import (comando_gallerydl, comando_ytdlp, localizar_ferramenta, localizar_winget)
 from previas import extrair_dados_previa
 
 # Formato: melhor vídeo + melhor áudio, juntados em MP4.
@@ -85,8 +88,73 @@ class Cancelado(Exception):
 # Localização do yt-dlp
 # ---------------------------------------------------------------------------
 def localizar_ytdlp():
-    """Procura o yt-dlp (PATH e pastas do winget). Retorna o caminho ou None."""
-    return localizar_ferramenta("yt-dlp")
+    """Comando para executar o yt-dlp: lista (versão em Python ou .exe) ou None."""
+    return comando_ytdlp()
+
+
+def _erro_sem_ytdlp():
+    """Erro para quando não dá para executar o yt-dlp (não instalado, ou bloqueado)."""
+    exe = localizar_ferramenta("yt-dlp")
+    if exe:   # o .exe existe mas não executa: quase sempre é o Windows bloqueando
+        return ErroDownload(MSG_BLOQUEIO_WINDOWS,
+                            original=f"yt-dlp.exe existe em {exe}, mas não executa (WinError 4551?) "
+                                     "e a versão em Python não está instalada.")
+    return ErroDownload("yt-dlp não encontrado. Dê dois cliques em ClipTube.bat para instalar.")
+
+
+@functools.lru_cache(maxsize=1)
+def _ytdlp_aceita_js_runtimes(ytdlp):
+    """O yt-dlp novo tem a opção --js-runtimes (versões antigas dão erro se ela existir).
+    `ytdlp` é a tupla do comando (precisa ser hashable por causa do cache)."""
+    try:
+        r = subprocess.run([*ytdlp, "--help"], capture_output=True, timeout=30,
+                           creationflags=SEM_JANELA)
+        return b"--js-runtimes" in r.stdout
+    except Exception:
+        return False
+
+
+def argumentos_js(ytdlp):
+    """Diz ao yt-dlp onde está o Deno (interpretador de JavaScript que o YouTube exige),
+    mesmo quando ele não está no PATH (acontece logo depois de instalar pelo winget)."""
+    deno = localizar_ferramenta("deno")
+    if deno and _ytdlp_aceita_js_runtimes(tuple(ytdlp)):
+        return ["--js-runtimes", f"deno:{deno}"]
+    return []
+
+
+def info_ambiente():
+    """Texto com versões e locais das ferramentas, para diagnosticar erros em outro PC."""
+    def primeira_linha(comando):
+        try:
+            r = subprocess.run(comando, capture_output=True, timeout=20,
+                               creationflags=SEM_JANELA, env=_ambiente_utf8())
+            linhas = (r.stdout or r.stderr).decode("utf-8", errors="replace").strip().splitlines()
+            return linhas[0][:110] if linhas else "(sem resposta)"
+        except Exception as e:
+            return f"ERRO ao executar: {e}"
+
+    linhas = [f"Windows: {platform.platform()}",
+              f"Python: {sys.version.split()[0]}  [{sys.executable}]"]
+    # yt-dlp e gallery-dl: mostra o comando que o app realmente usa (versão em Python ou .exe)
+    for nome, comando, exe in (("yt-dlp", comando_ytdlp(), localizar_ferramenta("yt-dlp")),
+                               ("gallery-dl", comando_gallerydl(), localizar_ferramenta("gallery-dl"))):
+        if comando:
+            via = "versão em Python" if len(comando) > 1 else "programa .exe"
+            linhas.append(f"{nome}: {primeira_linha([*comando, '--version'])}  [{via}]")
+        elif exe:
+            linhas.append(f"{nome}: NAO EXECUTA - [WinError 4551] bloqueado pelo Windows?  [{exe}]")
+        else:
+            linhas.append(f"{nome}: NAO ENCONTRADO")
+    for nome, argumento in (("ffmpeg", "-version"), ("ffprobe", "-version"), ("deno", "--version")):
+        caminho = localizar_ferramenta(nome)
+        if caminho:
+            linhas.append(f"{nome}: {primeira_linha([caminho, argumento])}  [{caminho}]")
+        else:
+            linhas.append(f"{nome}: NAO ENCONTRADO")
+    winget = localizar_winget()
+    linhas.append(f"winget: {primeira_linha([winget, '--version']) if winget else 'NAO ENCONTRADO'}")
+    return "\n".join(linhas)
 
 
 def _ambiente_utf8():
@@ -98,11 +166,39 @@ def _ambiente_utf8():
 
 
 # ---------------------------------------------------------------------------
+# Windows bloqueando um programa (Smart App Control / Controle de Aplicativo)
+# ---------------------------------------------------------------------------
+MSG_BLOQUEIO_WINDOWS = ("O Windows bloqueou um dos programas do ClipTube (erro 4551, política de "
+                        "Controle de Aplicativo). Clique aqui para ver qual e como liberar.")
+
+COMO_RESOLVER_BLOQUEIO = (
+    "COMO RESOLVER: o Windows está bloqueando um programa.\n"
+    "- Na seção \"Ambiente\" abaixo, o programa com [WinError 4551] é o que está bloqueado\n"
+    "  (yt-dlp, ffmpeg, ffprobe, deno ou gallery-dl).\n"
+    "- Se o computador é seu: abra Segurança do Windows > Controle de aplicativos e navegador >\n"
+    "  Configurações do Controle inteligente de aplicativo e escolha \"Desativado\".\n"
+    "  Atenção: depois de desativado, só dá para ligar de novo reinstalando o Windows.\n"
+    "- Se o computador é da empresa ou da escola: a regra é do administrador (TI). Peça para\n"
+    "  liberar esses programas.\n\n")
+
+
+def eh_bloqueio_windows(erro):
+    """O erro (exceção ou texto) é o Windows bloqueando um programa?"""
+    if getattr(erro, "winerror", None) == 4551:
+        return True
+    texto = str(erro).lower()
+    return any(x in texto for x in ("winerror 4551", "controle de aplicativo", "application control",
+                                    "app control", "smart app control"))
+
+
+# ---------------------------------------------------------------------------
 # Tradução de erros
 # ---------------------------------------------------------------------------
 # Cada regra: (trechos que podem aparecer no erro do yt-dlp, mensagem amigável).
 # A ordem importa: as mais específicas vêm primeiro.
 _REGRAS_ERRO = [
+    (("winerror 4551", "controle de aplicativo", "application control", "app control",
+      "smart app control"), MSG_BLOQUEIO_WINDOWS),
     (("private video", "video is private"),
      "Este vídeo é privado. Só o dono do canal consegue assistir."),
     (("sign in to confirm your age", "age-restricted", "inappropriate for some users"),
@@ -187,11 +283,11 @@ def obter_info(url, timeout=90, login=None):
         raise ErroDownload(twitch.mensagem_link_invalido_twitch(url))
     ytdlp = localizar_ytdlp()
     if not ytdlp:
-        raise ErroDownload("yt-dlp não encontrado. Instale com: winget install yt-dlp")
+        raise _erro_sem_ytdlp()
 
     try:
         proc = subprocess.run(
-            [ytdlp, "-J", "--no-playlist", "--no-warnings", url],
+            [*ytdlp, "-J", "--no-playlist", "--no-warnings", *argumentos_js(ytdlp), url],
             capture_output=True, timeout=timeout,
             creationflags=SEM_JANELA, env=_ambiente_utf8(),
         )
@@ -230,11 +326,11 @@ def obter_info_instagram(url, login=None, timeout=90):
                            "(perfis inteiros não são suportados).")
     ytdlp = localizar_ytdlp()
     if not ytdlp:
-        raise ErroDownload("yt-dlp não encontrado. Instale com: winget install yt-dlp")
+        raise _erro_sem_ytdlp()
     login_args = instagram.argumentos_login(login)
 
     try:
-        proc = subprocess.run([ytdlp, "-J", "--no-warnings", *login_args, url],
+        proc = subprocess.run([*ytdlp, "-J", "--no-warnings", *argumentos_js(ytdlp), *login_args, url],
                               capture_output=True, timeout=timeout,
                               creationflags=SEM_JANELA, env=_ambiente_utf8())
     except subprocess.TimeoutExpired:
@@ -266,15 +362,15 @@ def obter_info_instagram(url, login=None, timeout=90):
     if instagram.erro_de_cookies(erro) or traduzir_erro(erro).startswith("Sem conexão"):
         raise ErroDownload(traduzir_erro_plataforma(erro, url, login), original=erro)
 
-    gallerydl = localizar_ferramenta("gallery-dl")
+    gallerydl = comando_gallerydl()
     if not gallerydl:
         if instagram.precisa_gallerydl(erro):
             raise ErroDownload("Esse post parece ter só fotos e isso precisa do gallery-dl. "
-                               "Instale com: winget install mikf.gallery-dl", original=erro)
+                               "Instale com: python -m pip install gallery-dl", original=erro)
         raise ErroDownload(traduzir_erro_plataforma(erro, url, login), original=erro)
 
     try:
-        proc2 = subprocess.run([gallerydl, "-j", "--no-colors", *login_args, url],
+        proc2 = subprocess.run([*gallerydl, "-j", "--no-colors", *login_args, url],
                                capture_output=True, timeout=timeout,
                                creationflags=SEM_JANELA, env=_ambiente_utf8())
     except subprocess.TimeoutExpired:
@@ -519,7 +615,7 @@ class Baixador:
         """
         ytdlp = localizar_ytdlp()
         if not ytdlp:
-            raise ErroDownload("yt-dlp não encontrado. Instale com: winget install yt-dlp")
+            raise _erro_sem_ytdlp()
 
         os.makedirs(pasta, exist_ok=True)
         self._cancelado.clear()
@@ -564,7 +660,8 @@ class Baixador:
                 argumentos_tw += ["-o", "%(uploader|twitch)s - %(title).80s [%(id)s].%(ext)s"]
 
         comando = [
-            ytdlp,
+            *ytdlp,
+            *argumentos_js(ytdlp),
             "-f", FORMATO,
             "-S", ordenacao(limite_res),
             *argumentos_clipe,
@@ -675,10 +772,10 @@ class Baixador:
             texto = erro1.original
             if instagram.erro_de_cookies(texto) or str(erro1).startswith("Sem conexão"):
                 raise
-            if not localizar_ferramenta("gallery-dl"):
+            if not comando_gallerydl():
                 if instagram.precisa_gallerydl(texto):
                     raise ErroDownload("Esse post só tem fotos e isso precisa do gallery-dl. "
-                                       "Instale com: winget install mikf.gallery-dl", original=texto)
+                                       "Instale com: python -m pip install gallery-dl", original=texto)
                 raise
             if ao_etapa:
                 ao_etapa("Baixando as fotos do post...")
@@ -692,13 +789,13 @@ class Baixador:
 
     def _baixar_gallerydl(self, url, pasta, ao_progresso, ao_etapa, login):
         """Baixa fotos (e vídeos) de um post com o gallery-dl."""
-        gallerydl = localizar_ferramenta("gallery-dl")
+        gallerydl = comando_gallerydl()
         if not gallerydl:
-            raise ErroDownload("Falta o gallery-dl. Instale com: winget install mikf.gallery-dl")
+            raise ErroDownload("Falta o gallery-dl. Instale com: python -m pip install gallery-dl")
         os.makedirs(pasta, exist_ok=True)
         self._cancelado.clear()
         comando = [
-            gallerydl, "--no-colors", "-D", pasta,
+            *gallerydl, "--no-colors", "-D", pasta,
             "-f", "{username}_{post_shortcode|media_id|id}_{num}.{extension}",
             *instagram.argumentos_login(login),
             url,

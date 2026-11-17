@@ -1,2 +1,5 @@
 customtkinter>=5.2
 pillow>=10.0
+# yt-dlp e gallery-dl como bibliotecas Python: o Windows pode bloquear os .exe deles
+yt-dlp[default]
+gallery-dl
