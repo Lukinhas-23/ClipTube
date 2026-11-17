@@ -1,18 +1,24 @@
 # ClipTube
 
-ClipTube é um app com interface gráfica que baixa vídeos do YouTube (e vídeos e fotos do Instagram) usando o yt-dlp.
+ClipTube é um app com interface gráfica que baixa vídeos do YouTube, vídeos e fotos do Instagram e gravações (VODs) e clips da Twitch, usando o yt-dlp.
 
 ## Como abrir (depois de baixar do GitHub)
 
 1. Baixe o projeto: no GitHub clique em **Code → Download ZIP** e extraia a pasta (ou use `git clone https://github.com/Lukinhas-23/ClipTube.git`).
-2. Dê dois cliques em **`ClipTube.bat`**, dentro da pasta. O app abre sem janela de terminal e funciona de qualquer lugar onde você colocar a pasta.
-3. Na primeira vez, o `ClipTube.bat` cria na mesma pasta um atalho **ClipTube** com o ícone do app. Dali em diante pode abrir por esse atalho, copiá-lo para a Área de Trabalho ou fixá-lo na barra de tarefas.
+2. Dê dois cliques em **`ClipTube.bat`**, dentro da pasta. É o único arquivo que você precisa abrir.
+3. **Na primeira vez** o `ClipTube.bat` abre uma janela preta e **instala tudo sozinho** (precisa de internet, pode levar alguns minutos; não feche a janela):
+   - o **Python**, se o computador não tiver (pelo winget);
+   - as bibliotecas do app (customtkinter e pillow);
+   - o **yt-dlp** e o **FFmpeg**, que baixam e convertem os vídeos;
+   - o **gallery-dl**, que baixa as fotos do Instagram.
+   Quando termina, o app abre. Nas próximas vezes ele abre direto, sem janela preta.
+4. O `ClipTube.bat` também cria na pasta um atalho **ClipTube** com o ícone do app. Dali em diante pode abrir por esse atalho, copiá-lo para a Área de Trabalho ou fixá-lo na barra de tarefas.
 
-Se o Python não estiver instalado, o `ClipTube.bat` avisa e mostra o comando para instalar (`winget install Python.Python.3.12`).
+Requisitos: Windows 10/11 com o **winget** (já vem no Windows 11 e no Windows 10 atualizado). Se o winget não existir, o `ClipTube.bat` explica como instalar o Python na mão.
 
-## Instalação (automática na primeira vez)
+## Instalação (o que o ClipTube.bat faz na primeira vez)
 
-Você só precisa do **Windows 10/11** (com o winget, que já vem nele) e do **Python 3.10+** (se for rodar pelo código; o `.exe` não precisa de Python).
+O `ClipTube.bat` chama o `preparo.py`, que confere e instala o que faltar. Se você preferir fazer na mão, ou rodar só o preparo: `python preparo.py --instalar`.
 
 Na primeira vez que o ClipTube abre, ele mesmo prepara tudo:
 
@@ -28,6 +34,18 @@ python -m pip install -r requirements.txt
 winget install yt-dlp.yt-dlp
 winget install yt-dlp.FFmpeg
 ```
+
+### Twitch (gravações inteiras da live e clips)
+
+Cole o link de uma **gravação (VOD)** (`twitch.tv/videos/...`) ou de um **clip**:
+
+- **Gravação inteira da live:** baixa o VOD completo, de qualquer duração (de minutos a muitas horas), em MP4 H.264 + AAC, com o menu de qualidade (1080p60, 720p60, 480p...) e o **tamanho estimado** de cada opção. Atenção: um VOD de 2 horas em 1080p60 passa de 7 GB. O app confere se há espaço no disco antes de começar e avisa se não houver.
+- **Recorte de clip:** funciona também nas gravações: linha do tempo, quadros de início/fim e prévia com som, igual ao YouTube. Dá para tirar um trecho de uma live de horas sem baixar tudo.
+- **Clips da Twitch:** baixam inteiros (já são curtos, até 1 minuto), sem a área de recorte.
+- **Link do canal (a live ao vivo):** o app não baixa o canal e explica o que fazer: abra `twitch.tv/NOME_DO_CANAL/videos`, clique na gravação e cole esse link. **A gravação já aparece lá enquanto a live ainda está no ar** e dá para baixar até o ponto atual.
+- Links de listas (`.../videos`, `.../clips`) também são recusados, para o app nunca baixar um canal inteiro sem querer.
+- Gravações só para assinantes não são suportadas (o app ainda não entra com login na Twitch), e a Twitch apaga gravações antigas depois de alguns dias.
+- Cancelar um download apaga os arquivos parciais.
 
 ### Instagram (vídeos, reels, stories e fotos)
 
@@ -83,14 +101,15 @@ Original  •  2160p (4K)  •  60fps  •  ≈ 2.1 GB  •  converte H.264
 
 | Arquivo | Para que serve |
 |---|---|
-| `ClipTube.bat` | **Abre o app** (dois cliques). Cria o atalho ClipTube com ícone na primeira vez |
+| `ClipTube.bat` | **Abre o app** (dois cliques). Na primeira vez instala tudo e cria o atalho ClipTube com ícone |
 | `app.py` | A janela (interface, fila, prévia, barra de progresso) |
 | `downloader.py` | Conversa com o yt-dlp: busca informações, baixa, traduz erros |
 | `clip_ui.py` | A área de recorte: linha do tempo, alças, quadros de início/fim e o player da prévia |
 | `previas.py` | Miniaturas (storyboard), quadro exato e player da prévia, sem baixar o vídeo todo |
 | `tema.py` | Cores e fonte do app |
 | `instagram.py` | Regras do Instagram: links, login por cookies, erros em português |
-| `preparo.py` | Configuração da primeira vez: instala bibliotecas (pip) e yt-dlp/FFmpeg (winget) |
+| `twitch.py` | Regras da Twitch: gravações e clips, recusa de links de canal, erros em português |
+| `preparo.py` | Instalação da primeira vez: bibliotecas (pip), yt-dlp, FFmpeg e gallery-dl (winget). Também roda sozinho: `python preparo.py --instalar` |
 | `dist\ClipTube.exe` | Gerado pelo `gerar_exe.bat`: o app em um arquivo só, com ícone |
 | `gerar_exe.bat` | Gera o `ClipTube.exe` (com ícone) |
 | `assets\` | Ícone do app: `icone_original.jpg` (arte oficial), `icone.ico`/`icone.png` (gerados) e `criar_icone.py` |

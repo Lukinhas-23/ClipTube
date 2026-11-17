@@ -15,6 +15,7 @@ Como funciona, em resumo:
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -31,6 +32,7 @@ from tkinter import filedialog
 import downloader as dl
 import clip_ui
 import instagram
+import twitch
 
 # ---------------------------------------------------------------------------
 # Configurações gerais e cores
@@ -97,8 +99,8 @@ def eh_link_youtube(texto):
 
 
 def eh_link_suportado(texto):
-    """Link do YouTube ou do Instagram."""
-    return eh_link_youtube(texto) or instagram.eh_instagram(texto)
+    """Link do YouTube, Instagram ou Twitch."""
+    return eh_link_youtube(texto) or instagram.eh_instagram(texto) or twitch.eh_twitch(texto)
 
 
 def mensagem_link_invalido(texto):
@@ -110,7 +112,9 @@ def mensagem_link_invalido(texto):
             return None
         return ("Use o link de um post, reel ou story do Instagram "
                 "(perfis inteiros não são suportados).")
-    return "Link inválido. Use um link do YouTube ou do Instagram."
+    if twitch.eh_twitch(texto):
+        return None if twitch.eh_video_twitch(texto) else twitch.mensagem_link_invalido_twitch(texto)
+    return "Link inválido. Use um link do YouTube, Instagram ou Twitch."
 
 
 def formatar_tamanho(bytes_por_seg):
@@ -373,7 +377,7 @@ class App(ctk.CTk):
                      font=(FONTE, 22, "bold")).pack(side="left")
         ctk.CTkLabel(topo, text="Tube", text_color=VERMELHO,
                      font=(FONTE, 22, "bold")).pack(side="left")
-        ctk.CTkLabel(topo, text="   vídeos do YouTube e Instagram", text_color=TEXTO_SEC,
+        ctk.CTkLabel(topo, text="   YouTube, Instagram e Twitch", text_color=TEXTO_SEC,
                      font=(FONTE, 12)).pack(side="left", pady=(6, 0))
 
         # --- Cartão do link + prévia --------------------------------------
@@ -597,7 +601,8 @@ class App(ctk.CTk):
             self._definir_modo("youtube")
             self._mostrar_previa_vazia()
             return
-        self._definir_modo("instagram" if instagram.eh_instagram(url) else "youtube")
+        self._definir_modo("instagram" if instagram.eh_instagram(url)
+                           else "twitch" if twitch.eh_twitch(url) else "youtube")
         invalido = mensagem_link_invalido(url)
         if invalido:
             self._mostrar_previa_vazia(invalido, ERRO)
@@ -751,7 +756,14 @@ class App(ctk.CTk):
             self._resetar_qualidades()
         if info.get("plataforma") == "instagram":
             self._resetar_clip(self._dica_clip())
+        elif info.get("plataforma") == "twitch" and info.get("tipo") == "clip":
+            # Clips da Twitch já são curtos (até 1 min): baixa o clip inteiro, sem recorte
+            self._resetar_clip("Clips da Twitch já são curtos: baixe o clip inteiro.")
+            self.seletor.grid_remove()
+            self.botao_clipar.grid_remove()
         else:
+            self.seletor.grid()                  # YouTube ou gravação (VOD) da Twitch
+            self.botao_clipar.grid()
             self._configurar_clip(info)
         if imagem is not None:
             self._imagem_previa = ctk.CTkImage(light_image=imagem, dark_image=imagem, size=(114, 64))
@@ -798,7 +810,7 @@ class App(ctk.CTk):
         """Coloca na fila um clip do trecho escolhido (e começa a baixar)."""
         url = self._ler_link()
         trecho = self.seletor.trecho()
-        if not url or not eh_link_youtube(url) or not trecho:
+        if not url or not (eh_link_youtube(url) or twitch.eh_vod_twitch(url)) or not trecho:
             self._definir_status("Cole o link e espere carregar o vídeo para criar o clip.", AMARELO)
             return
         ini, fim = trecho
@@ -937,7 +949,7 @@ class App(ctk.CTk):
                 return
         if not any(i.status == "aguardando" for i in self.fila):
             if not self.trabalhando:
-                self._definir_status("Cole um link do YouTube ou do Instagram primeiro.", AMARELO)
+                self._definir_status("Cole um link do YouTube, Instagram ou Twitch primeiro.", AMARELO)
             return
         self._iniciar_fila()
 
@@ -970,6 +982,13 @@ class App(ctk.CTk):
                     ultimo_envio[0] = agora
                     self._na_ui(self._atualizar_progresso, it, dados)
 
+            aviso_espaco = self._verificar_espaco(item, pasta)
+            if aviso_espaco:
+                item.status, item.mensagem = "erro", aviso_espaco
+                erros += 1
+                self._na_ui(self._ao_terminar_item, item)
+                continue
+
             try:
                 resultado = self.baixador.baixar(
                     item.url, pasta,
@@ -995,6 +1014,35 @@ class App(ctk.CTk):
             self._na_ui(self._ao_terminar_item, item)
 
         self._na_ui(self._ao_terminar_fila, baixados, erros, False)
+
+    def _verificar_espaco(self, item, pasta):
+        """Avisa antes de começar se o disco não tem espaço para o tamanho estimado
+        (importante em gravações da Twitch, que passam de vários GB). Retorna o aviso ou None."""
+        info = self._cache_info.get(item.url) or {}
+        qualidades = info.get("qualidades") or []
+        if not qualidades:
+            return None
+        q = next((x for x in qualidades if item.limite_res is None or x["res"] <= item.limite_res),
+                 qualidades[-1])
+        tamanho = q.get("tamanho") or 0
+        if item.inicio is not None and info.get("duracao"):       # clip: só o trecho
+            tamanho = tamanho * (item.fim - item.inicio) / info["duracao"]
+        if not tamanho:
+            return None
+        alvo = pasta
+        while alvo and not os.path.isdir(alvo):                   # pasta ainda não existe: usa a unidade
+            pai = os.path.dirname(alvo)
+            if pai == alvo:
+                break
+            alvo = pai
+        try:
+            livre = shutil.disk_usage(alvo).free
+        except OSError:
+            return None
+        if livre < tamanho * 1.1:
+            return (f"Sem espaço suficiente: precisa de uns {formatar_bytes(tamanho)} e a unidade "
+                    f"tem só {formatar_bytes(livre)} livres. Libere espaço ou escolha outra pasta.")
+        return None
 
     def _mostrar_etapa(self, item, etapa=None):
         """Mostra a etapa atual ("Baixando vídeo...") junto com o título do vídeo."""

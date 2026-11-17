@@ -68,7 +68,7 @@ def _escolher_stream(dados):
     bons.sort(key=lambda f: (not (f.get("vcodec") or "").startswith("avc1"), lado_menor(f)))
     video = bons[0] if bons else (max(videos, key=lado_menor) if videos else None)
     if not video:
-        return None
+        return _stream_hls_com_audio(dados)
 
     audios = [f for f in formatos if f.get("acodec") not in (None, "none")
               and f.get("vcodec") in (None, "none") and "drc" not in str(f.get("format_id", ""))]
@@ -77,6 +77,24 @@ def _escolher_stream(dados):
                                        f.get("ext") == "m4a", f.get("abr") or 0)) if audios else None
     return {"video": video["url"], "audio": audio["url"] if audio else None,
             "largura": video["width"], "altura": video["height"]}
+
+
+def _stream_hls_com_audio(dados):
+    """Plano B (ex.: Twitch): só existem streams HLS com imagem e som juntos.
+
+    Usa o menor com pelo menos 360p. O mesmo link serve para os quadros e para o áudio.
+    """
+    muxados = [f for f in (dados.get("formats") or [])
+               if f.get("url") and "m3u8" in str(f.get("protocol", ""))
+               and f.get("vcodec") not in (None, "none") and f.get("acodec") not in (None, "none")
+               and f.get("width") and f.get("height")]
+    if not muxados:
+        return None
+    bons = sorted((f for f in muxados if min(f["width"], f["height"]) >= 360),
+                  key=lambda f: min(f["width"], f["height"]))
+    escolhido = bons[0] if bons else max(muxados, key=lambda f: min(f["width"], f["height"]))
+    return {"video": escolhido["url"], "audio": escolhido["url"],
+            "largura": escolhido["width"], "altura": escolhido["height"]}
 
 
 # ---------------------------------------------------------------------------

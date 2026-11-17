@@ -23,6 +23,7 @@ import urllib.request
 from io import BytesIO
 
 import instagram
+import twitch
 from preparo import localizar_ferramenta
 from previas import extrair_dados_previa
 
@@ -164,6 +165,10 @@ def traduzir_erro_plataforma(texto, url, login=None):
         frase = instagram.traduzir_erro_instagram(texto, login)
         if frase:
             return frase
+    if twitch.eh_twitch(url):
+        frase = twitch.traduzir_erro_twitch(texto)
+        if frase:
+            return frase
     return traduzir_erro(texto)
 
 
@@ -178,6 +183,8 @@ def obter_info(url, timeout=90, login=None):
     """
     if instagram.eh_instagram(url):
         return obter_info_instagram(url, login, timeout)
+    if twitch.eh_twitch(url) and not twitch.eh_video_twitch(url):
+        raise ErroDownload(twitch.mensagem_link_invalido_twitch(url))
     ytdlp = localizar_ytdlp()
     if not ytdlp:
         raise ErroDownload("yt-dlp não encontrado. Instale com: winget install yt-dlp")
@@ -194,10 +201,10 @@ def obter_info(url, timeout=90, login=None):
     saida = proc.stdout.decode("utf-8", errors="replace")
     erro = proc.stderr.decode("utf-8", errors="replace")
     if proc.returncode != 0 or not saida.strip():
-        raise ErroDownload(traduzir_erro(erro))
+        raise ErroDownload(traduzir_erro_plataforma(erro, url), original=erro)
 
     dados = json.loads(saida)
-    return {
+    info = {
         "titulo": dados.get("title") or "(sem título)",
         "canal": dados.get("uploader") or dados.get("channel") or "",
         "duracao": dados.get("duration"),
@@ -205,6 +212,10 @@ def obter_info(url, timeout=90, login=None):
         "qualidades": listar_qualidades(dados),
         "previa": extrair_dados_previa(dados),     # miniaturas e links para o recorte de clip
     }
+    if twitch.eh_twitch(url):
+        info["plataforma"] = "twitch"
+        info["tipo"] = "clip" if twitch.eh_clip_twitch(url) else "vod"
+    return info
 
 
 def obter_info_instagram(url, login=None, timeout=90):
@@ -285,6 +296,15 @@ def obter_info_instagram(url, login=None, timeout=90):
     }
 
 
+def _fps_comum(fps):
+    """Arredonda para o fps "de nome": 59.494 -> 60, 29.97 -> 30, 23.976 -> 24."""
+    fps = float(fps or 0)
+    for comum in (24, 25, 30, 48, 50, 60):
+        if abs(fps - comum) < 1:
+            return comum
+    return round(fps)
+
+
 def listar_qualidades(dados):
     """Lista as resoluções disponíveis do vídeo, da maior para a menor.
 
@@ -300,17 +320,19 @@ def listar_qualidades(dados):
 
     por_res = {}
     for f in dados.get("formats") or []:
-        if f.get("vcodec") in (None, "none"):
+        vcodec = f.get("vcodec")
+        if vcodec == "none":
             continue  # só áudio ou imagens de prévia
+        # Alguns sites (ex.: clips da Twitch) não informam codec nem largura, só a altura.
         largura, altura = f.get("width"), f.get("height")
-        if not largura or not altura:
+        if not altura:
             continue
-        res = min(largura, altura)
+        res = min(largura, altura) if largura else altura
         if res < 144:
             continue
         q = por_res.setdefault(res, {"res": res, "fps": 0, "h264": False, "tamanho": 0})
-        q["fps"] = max(q["fps"], int(f.get("fps") or 0))
-        if (f.get("vcodec") or "").startswith("avc1"):
+        q["fps"] = max(q["fps"], _fps_comum(f.get("fps")))
+        if (vcodec or "").startswith("avc1") or (not vcodec and f.get("ext") == "mp4"):
             q["h264"] = True
         tamanho = f.get("filesize") or f.get("filesize_approx")
         if not tamanho and f.get("tbr") and duracao:
@@ -436,16 +458,28 @@ class Baixador:
                            capture_output=True, creationflags=SEM_JANELA)
 
     @staticmethod
-    def _apagar_parciais(destinos):
-        """Apaga os pedaços incompletos (.part, .ytdl) de um download cancelado."""
-        time.sleep(0.5)  # dá tempo do Windows liberar os arquivos
+    def _apagar_parciais(destinos, pasta=None, antes=None):
+        """Apaga os pedaços incompletos (.part, .ytdl, fragmentos) de um download cancelado.
+
+        Além dos arquivos que o yt-dlp avisou, apaga tudo o que apareceu na pasta durante
+        este download (o yt-dlp às vezes imprime o nome sem alguns caracteres do título,
+        e o HLS da Twitch deixa muitos arquivos de fragmento)."""
+        time.sleep(0.8)  # dá tempo do Windows liberar os arquivos
+        candidatos = []
         for caminho in destinos:
-            for arquivo in (caminho, caminho + ".part", caminho + ".ytdl"):
-                try:
-                    if os.path.isfile(arquivo):
-                        os.remove(arquivo)
-                except OSError:
-                    pass
+            candidatos += [caminho, caminho + ".part", caminho + ".ytdl"]
+        if pasta and antes is not None:
+            try:
+                candidatos += [os.path.join(pasta, nome) for nome in os.listdir(pasta)
+                               if nome not in antes]
+            except OSError:
+                pass
+        for arquivo in candidatos:
+            try:
+                if os.path.isfile(arquivo):
+                    os.remove(arquivo)
+            except OSError:
+                pass
 
     @staticmethod
     def _local_ffmpeg():
@@ -461,6 +495,8 @@ class Baixador:
         Links do Instagram seguem outro caminho (veja _baixar_instagram)."""
         if instagram.eh_instagram(url):
             return self._baixar_instagram(url, pasta, ao_progresso, ao_etapa, login)
+        if twitch.eh_twitch(url) and not twitch.eh_video_twitch(url):
+            raise ErroDownload(twitch.mensagem_link_invalido_twitch(url))
         for tentativa in range(1, tentativas + 1):
             try:
                 return self._baixar_uma_vez(url, pasta, ao_progresso, ao_etapa,
@@ -487,6 +523,7 @@ class Baixador:
 
         os.makedirs(pasta, exist_ok=True)
         self._cancelado.clear()
+        antes = set(os.listdir(pasta))      # para limpar só o que este download criar
 
         template = (MARCA_PROGRESSO +
                     "%(progress.downloaded_bytes)s|%(progress.total_bytes)s|"
@@ -507,7 +544,7 @@ class Baixador:
             argumentos_clipe = [
                 "--download-sections", f"*{inicio:.2f}-{fim:.2f}",
                 "--force-keyframes-at-cuts",
-                "-o", f"%(title)s [%(id)s] clip {nome_tempo(inicio)}-{nome_tempo(fim)}.%(ext)s",
+                "-o", f"%(title).100s [%(id)s] clip {nome_tempo(inicio)}-{nome_tempo(fim)}.%(ext)s",
             ]
 
         # Instagram: posts com vários vídeos viram uma "playlist" (todos devem ser baixados),
@@ -518,12 +555,21 @@ class Baixador:
             argumentos_ig = [*instagram.argumentos_login(login),
                              "-o", "%(uploader_id|instagram)s - %(id)s.%(ext)s"]
 
+        # Twitch: as gravações são HLS (milhares de pedacinhos) e podem ter muitas horas;
+        # baixar 4 pedaços ao mesmo tempo acelera bastante. O nome inclui o canal.
+        argumentos_tw = []
+        if twitch.eh_twitch(url):
+            argumentos_tw = ["--concurrent-fragments", "4"]
+            if not clipe:
+                argumentos_tw += ["-o", "%(uploader|twitch)s - %(title).80s [%(id)s].%(ext)s"]
+
         comando = [
             ytdlp,
             "-f", FORMATO,
             "-S", ordenacao(limite_res),
             *argumentos_clipe,
             *argumentos_ig,
+            *argumentos_tw,
             "--merge-output-format", "mp4",
             "--print-to-file", "after_move:filepath", arquivo_caminho,
             "-P", pasta,
@@ -593,7 +639,7 @@ class Baixador:
         self._processo = None
 
         if self._cancelado.is_set():
-            self._apagar_parciais(destinos)
+            self._apagar_parciais(destinos, pasta, antes)
             raise Cancelado()
         if codigo != 0:
             texto_erro = "\n".join(linhas_erro)

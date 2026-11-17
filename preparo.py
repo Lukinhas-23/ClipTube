@@ -213,3 +213,76 @@ def garantir_bibliotecas():
             "python -m pip install -r requirements.txt\n\n"
             + (resultado.get("erro") or ""))
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Modo "linha de comando": usado pelo ClipTube.bat na primeira vez
+#   python preparo.py --verificar   -> código 0 se tudo que o app precisa já está instalado
+#   python preparo.py --instalar    -> instala o que faltar (mostrando o andamento)
+# ---------------------------------------------------------------------------
+def _instalar_bibliotecas_console():
+    """Instala customtkinter e pillow com o pip, mostrando o andamento."""
+    if _bibliotecas_ok():
+        return True
+    print("  Instalando as bibliotecas do Python (customtkinter, pillow)...")
+    requisitos = os.path.join(_PASTA_APP, "requirements.txt")
+    comando = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--quiet"]
+    comando += ["-r", requisitos] if os.path.isfile(requisitos) else ["customtkinter", "pillow"]
+    try:
+        codigo = subprocess.run(comando).returncode
+    except OSError:
+        return False
+    importlib.invalidate_caches()
+    return codigo == 0 and _bibliotecas_ok()
+
+
+def _tudo_pronto():
+    return _bibliotecas_ok() and not ferramentas_faltando()
+
+
+def instalar_tudo():
+    """Instala o que faltar. Retorna 0 se o app já pode funcionar, 1 se não."""
+    print()
+    print("  ClipTube - preparando o computador (so na primeira vez).")
+    print("  Precisa de internet e pode levar alguns minutos. Nao feche esta janela.")
+    print()
+    atualizar_path()
+
+    print("[1/3] Bibliotecas do Python")
+    libs_ok = _instalar_bibliotecas_console()
+    print("      " + ("OK" if libs_ok else "FALHOU (veja a mensagem acima)"))
+
+    print("[2/3] yt-dlp e FFmpeg (baixam os videos)")
+    faltando = ferramentas_faltando()
+    if faltando:
+        ok, mensagem = instalar_ferramentas(faltando, ao_log=lambda t: print("      " + t))
+        print("      " + ("OK" if ok else "FALHOU: " + mensagem))
+        essenciais_ok = ok
+    else:
+        print("      ja instalados")
+        essenciais_ok = True
+
+    print("[3/3] gallery-dl (fotos do Instagram)")
+    if localizar_ferramenta("gallery-dl"):
+        print("      ja instalado")
+    else:
+        ok, mensagem = instalar_ferramentas([PACOTE_GALLERYDL], ao_log=lambda t: print("      " + t))
+        # Opcional: sem ele só as fotos do Instagram não funcionam; o app oferece de novo depois.
+        print("      " + ("OK" if ok else "nao foi possivel agora (o app oferece instalar depois)"))
+
+    print()
+    if libs_ok and essenciais_ok:
+        print("  Tudo pronto! Abrindo o ClipTube...")
+        return 0
+    print("  Nem tudo foi instalado. O ClipTube vai abrir e mostrar o que falta.")
+    return 1
+
+
+if __name__ == "__main__":
+    argumentos = sys.argv[1:]
+    if "--verificar" in argumentos:
+        sys.exit(0 if _tudo_pronto() else 1)
+    if "--instalar" in argumentos:
+        sys.exit(instalar_tudo())
+    print("Uso: python preparo.py --verificar | --instalar")
+    sys.exit(2)
