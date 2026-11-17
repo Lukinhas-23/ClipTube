@@ -1,0 +1,3 @@
+# Arquivos .bat precisam de quebras de linha do Windows (CRLF), tambem no ZIP baixado do GitHub
+*.bat text eol=crlf
+*.cmd text eol=crlf
